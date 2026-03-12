@@ -1,25 +1,26 @@
 
+
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
-import type { CategoryDTO, CreateCategoryInput } from "./category.type.js";
+import type { CategoryDTO, CreateCategoryInput, UpdateCategoryInput } from "./category.type.js";
 import { pool } from "../../db/pool.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
-import { ApiError, isDupError } from "../../shared/errors/ApiError.js";
+import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { translateCategoryNameGimini } from "../../shared/translate/translate_gimini.js";
+
 
 
 
 export async function listCategorys(): Promise<CategoryDTO[]> {
     const [rows] = await pool.query<(RowDataPacket & CategoryDTO)[]>(`
     SELECT
-      a.c_id, a.c_sort_order, a.e_id, a.ctl_id,
+      a.c_id,b.cl_id, a.c_sort_order, a.e_id, a.ctl_id,
       b.cl_name, b.lg_code,
-      c.ctl_name, c.ctl_description,
-      d.e_usercode
+      c.ctl_name, c.ctl_description, a.e_create_at 
     FROM Categorys a
     INNER JOIN CategoryLangs b ON a.c_id = b.c_id
     INNER JOIN Catalog c ON a.ctl_id = c.ctl_id
     INNER JOIN Employees d ON a.e_id = d.e_id
-    ORDER BY a.c_id ASC
+    ORDER BY b.cl_id, b.lg_code desc
   `);
 
     return rows;
@@ -55,12 +56,12 @@ export async function createCategory(input: CreateCategoryInput): Promise<number
         // 3) Insert translations (CategoryLangs) 3 แถว
         // แนะนำทำ UNIQUE (c_id, lg_code) ใน DB กันซ้ำ
         const langRows = [
-            [c_id, "th", t.th],
-            [c_id, "en", t.en],
-            [c_id, "ja", t.ja],
+            [c_id, "th", t.th, input.ctl_id],
+            [c_id, "en", t.en, input.ctl_id],
+            [c_id, "ja", t.ja, input.ctl_id],
         ];
 
-        await conn.query(`INSERT INTO CategoryLangs (c_id, lg_code, cl_name) VALUES ? `, [langRows]);
+        await conn.query(`INSERT INTO CategoryLangs (c_id, lg_code, cl_name,ctl_id) VALUES ? `, [langRows]);
         await conn.commit();
         return c_id;
     } catch (err: any) {
@@ -69,5 +70,40 @@ export async function createCategory(input: CreateCategoryInput): Promise<number
         throw err;
     } finally {
         conn.release();
+    }
+}
+
+export async function updateCategory(cl_id: number, input: Partial<UpdateCategoryInput>): Promise<void> {
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query("UPDATE CategoryLangs SET cl_name = ?,ctl_id = ? WHERE cl_id = ?", [input.cl_name, input.ctl_id, cl_id]);
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        if (isDupError(err)) throw new ApiError(409, CommonMessages.isExits);
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function deleteCategory(c_id: number): Promise<void> {
+    try {
+        const [resLang] = await pool.query<ResultSetHeader>(
+            "DELETE FROM CategoryLangs WHERE c_id = ?", [c_id]
+        );
+        const [res] = await pool.query<ResultSetHeader>(
+            "DELETE FROM Categorys WHERE c_id = ?", [c_id]
+        );
+        if (res.affectedRows === 0 && resLang.affectedRows === 0) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+        return;
+    } catch (err: any) {
+        if (isFkConstraintError(err)) {
+            throw new ApiError(409, CommonMessages.used);
+        }
+        throw err;
     }
 }

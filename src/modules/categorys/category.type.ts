@@ -7,22 +7,20 @@ export type CategoryDTO = {
     ctl_id: number;
     cl_name: string;
     lg_code: string;
-
     ctl_name: string;
-    ctl_description: string | null;
+    cl_id: number;
+    ctl_description: string;
     e_usercode: string;
 };
-
 
 export type CreateCategoryInput = {
     e_id: number;
     ctl_id: number;
     cl_name: string;
-
 }
 
-
-
 export type UpdateCategoryInput = {
-    c_sort_order: number,
+    cl_name: string;
+    c_id: number;
+    ctl_id: number;
 }
