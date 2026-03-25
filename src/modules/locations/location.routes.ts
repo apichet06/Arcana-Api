@@ -5,6 +5,7 @@ import { Auth } from "../../shared/middlewares/auth.js";
 
 
 export const LocationRouter = Router();
+
 LocationRouter.use(Auth);
 LocationRouter.get("/", controller.list);
 LocationRouter.get("/:st_id", controller.getById);

@@ -4,6 +4,7 @@ import { Auth } from "../../shared/middlewares/auth.js";
 
 export const unitRouters = Router();
 
+unitRouters.get("/:lang", controller.listByLang)
 unitRouters.use(Auth);
 unitRouters.get("/", controller.list)
 unitRouters.post("/", controller.create)

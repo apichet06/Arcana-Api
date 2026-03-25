@@ -3,7 +3,8 @@ import { pool } from "../../db/pool.js"
 import type { CreateProductTagsInput, ProductTagsDTO, UpdateProductTagsInput } from "./productTags.type.js"
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
-import { translateCategoryNameGimini } from "../../shared/translate/translate_gimini.js";
+import { translateProductText } from "../../shared/translate/translate.js";
+
 
 export async function listProductTags(): Promise<ProductTagsDTO[]> {
     const [rows] = await pool.query<(RowDataPacket & ProductTagsDTO)[]>(`
@@ -19,7 +20,7 @@ export async function create(input: CreateProductTagsInput): Promise<number> {
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
-        const t = await translateCategoryNameGimini(input.ptag_name);
+        const t = await translateProductText(input.ptag_name);
 
         const masterData = {
             e_id: input.e_id,

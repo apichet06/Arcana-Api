@@ -4,7 +4,6 @@ import { pool } from "../../db/pool.js";
 import type { BankDTO, CreateStoreInput, StoreDTO, UpdateStoreInput } from "./store.type.js";
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/index.js";
-import { requestLogger } from "../../shared/middlewares/requestLogger.js";
 
 export async function listStores(): Promise<StoreDTO[]> {
 

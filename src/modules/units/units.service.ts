@@ -1,25 +1,35 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
 import type { CreateUnitInput, UnitLangsDTO, UpdateUnitInput } from "./unitt.type.js";
-import { translateCategoryNameGimini } from "../../shared/translate/translate_gimini.js";
+
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 
 import { CommonMessages } from "../../shared/messages/common.messages.js";
+import { translateNameGimini } from "../../shared/translate/translate_gimini.js";
 
 export async function ListUnit(): Promise<UnitLangsDTO[]> {
     const [rows] = await pool.query<(RowDataPacket & UnitLangsDTO)[]>(`
         SELECT a.*,b.* FROM UnitLangs a 
         INNER JOIN Units b on a.u_id = b.u_id 
-        ORDER BY a.ul_id,a.lg_code desc
-        `);
+        ORDER BY a.ul_id,a.lg_code desc`);
     return rows;
 }
+
+export async function GetUnitByLang(lang: string): Promise<UnitLangsDTO[]> {
+    const [rows] = await pool.query<(RowDataPacket & UnitLangsDTO)[]>(`
+        SELECT a.*,b.* FROM UnitLangs a 
+        INNER JOIN Units b on a.u_id = b.u_id
+        WHERE a.lg_code = ?
+        ORDER BY a.ul_id,a.lg_code desc`, [lang]);
+    return rows;
+}
+
 
 export async function CreateUnit(input: CreateUnitInput): Promise<number> {
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
-        const t = await translateCategoryNameGimini(input.ul_name);
+        const t = await translateNameGimini(input.ul_name);
 
         const masterData = {
             e_id: input.e_id,

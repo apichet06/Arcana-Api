@@ -19,6 +19,9 @@ import { storeRouter } from "./modules/stores/store.routes.js";
 import path from "path";
 import { LocationRouter } from "./modules/locations/location.routes.js";
 import { EmpRouter } from "./modules/employees/emp.routes.js";
+import { productStatus } from "./modules/productStatus/productStatus.routes.js";
+import { productRouter } from "./modules/product/product.routes.js";
+import { OptionTypeRouter } from "./modules/optionType/optiontype.routes.js";
 
 export function createApp() {
     const app = express();
@@ -49,6 +52,9 @@ export function createApp() {
     app.use("/api/stores", storeRouter);
     app.use("/api/locations", LocationRouter);
     app.use("/api/employee", EmpRouter)
+    app.use("/api/productStatus", productStatus)
+    app.use("/api/products", productRouter)
+    app.use("/api/optionTypes", OptionTypeRouter)
 
 
     app.use(notFound);

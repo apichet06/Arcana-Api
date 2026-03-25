@@ -5,7 +5,8 @@ import type { CategoryDTO, CreateCategoryInput, UpdateCategoryInput } from "./ca
 import { pool } from "../../db/pool.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
-import { translateCategoryNameGimini } from "../../shared/translate/translate_gimini.js";
+import { translateNameGimini } from "../../shared/translate/translate_gimini.js";
+import { translateProductText } from "../../shared/translate/translate.js";
 
 
 
@@ -33,7 +34,7 @@ export async function createCategory(input: CreateCategoryInput): Promise<number
         await conn.beginTransaction();
 
         // 1) แปลภาษาให้ครบ 3 ภาษา
-        const t = await translateCategoryNameGimini(input.cl_name);
+        const t = await translateProductText(input.cl_name);
         const [rows] = await conn.query<any[]>(
             "SELECT COALESCE(MAX(c_sort_order), 0) as maxSort FROM Categorys FOR UPDATE"
         );

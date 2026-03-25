@@ -24,7 +24,7 @@ const TranslationSchema = z.object({
     ja: z.string(),
 });
 
-export async function translateCategoryNameGimini(th: string): Promise<{ th: string; en: string; ja: string }> {
+export async function translateNameGimini(th: string): Promise<{ th: string; en: string; ja: string }> {
     const text = (th ?? "").trim();
     if (!text) return { th: "", en: "", ja: "" };
 

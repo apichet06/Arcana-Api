@@ -4,11 +4,17 @@ import * as unit from "./units.service.js";
 
 
 export const list = asyncHandler(async (_req, res) => {
+
     const data = await unit.ListUnit();
     res.status(200).json({ data });
 
 });
+export const listByLang = asyncHandler(async (_req, res) => {
+    const { lang } = _req.params;
+    const data = await unit.GetUnitByLang(lang as string);
+    res.status(200).json({ data });
 
+});
 export const create = asyncHandler(async (req, res) => {
     const { ul_name } = req.body;
     const empId = Number(req.empId);
