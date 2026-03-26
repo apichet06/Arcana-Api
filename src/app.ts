@@ -22,6 +22,7 @@ import { EmpRouter } from "./modules/employees/emp.routes.js";
 import { productStatus } from "./modules/productStatus/productStatus.routes.js";
 import { productRouter } from "./modules/product/product.routes.js";
 import { OptionTypeRouter } from "./modules/optionType/optiontype.routes.js";
+import { productStockRouter } from "./modules/product-addstock/product-addstock.routes.js";
 
 export function createApp() {
     const app = express();
@@ -55,6 +56,7 @@ export function createApp() {
     app.use("/api/productStatus", productStatus)
     app.use("/api/products", productRouter)
     app.use("/api/optionTypes", OptionTypeRouter)
+    app.use("/api/produtStock", productStockRouter)
 
 
     app.use(notFound);

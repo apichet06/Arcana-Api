@@ -7,6 +7,7 @@ import { transformLexicalDescription } from "../../shared/utils/ฺBase64Image/t
 import { getImagesToDelete } from "../../shared/utils/ฺBase64Image/Lexical/getImagesToDelete.js";
 import { deleteImageFiles } from "../../shared/utils/ฺBase64Image/Lexical/deleteImageFiles.js";
 import { filterUnusedImages } from "../../shared/utils/ฺBase64Image/Lexical/filterUnusedImages.js";
+import { deleteManyPhysicalFiles } from "../../shared/helper/deleteUploadFile.js";
 
 const apiBaseUrl = process.env.API_BASE_URL ?? "";
 
@@ -23,6 +24,8 @@ export const create = asyncHandler(async (req, res) => {
 
     let images: string[] = [];
     const empId = Number(req.empId);
+    const storeId = Number(req.storeId);
+
 
     const exists = await products.getProductName(p_name);
 
@@ -67,6 +70,7 @@ export const create = asyncHandler(async (req, res) => {
         p_isActive: p_isActive,
         images,
         e_id: empId,
+        st_id: storeId,
     };
 
     const data = await products.createProduct(input);
@@ -81,6 +85,8 @@ export const update = asyncHandler(async (req, res) => {
     const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
     const pl_id = Number(req.params.pl_id);
     const emp_id = Number(req.empId);
+    const storeId = Number(req.storeId);
+
 
     const files = (req.files as Express.Multer.File[]) ?? [];
 
@@ -98,7 +104,7 @@ export const update = asyncHandler(async (req, res) => {
 
     const imagesToDelete = getImagesToDelete(oldDescription, transformedDescription);
 
-    const data = { p_title, p_name, p_description: transformedDescription, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, e_id: emp_id }
+    const data = { p_title, p_name, p_description: transformedDescription, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, e_id: emp_id, st_id: storeId }
     await products.UpdateProducts(pl_id, data, files);
     const otherDescriptions = await products.getOtherDescriptionsByProductId(rows.p_id, pl_id);
     const safeToDelete = filterUnusedImages(imagesToDelete, otherDescriptions);
@@ -107,16 +113,29 @@ export const update = asyncHandler(async (req, res) => {
     res.status(200).json({ message: CommonMessages.updateSuccess });
 })
 
-export const remove = asyncHandler(async (req, res) => { });
+export const remove = asyncHandler(async (req, res) => {
+    const p_id = Number(req.params.p_id);
+
+    const imagePaths = await products.deleteProduct(p_id);
+
+    await deleteManyPhysicalFiles(imagePaths);
+
+    res.status(200).json({
+        message: CommonMessages.deleteSuccess,
+    });
+});
 
 export const createOptionVariant = asyncHandler(async (req, res) => {
     const emptId = Number(req.empId);
+    const storeId = Number(req.storeId);
+
 
     const rawData = req.body.data;
     const data = rawData ? JSON.parse(rawData) : req.body;
 
     data.p_id = Number(req.params.p_id);
     data.e_id = emptId;
+    data.st_id = storeId;
 
     const files = req.files as Express.Multer.File[] | undefined;
 

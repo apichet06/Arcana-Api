@@ -39,6 +39,7 @@ export type CreateProductInput = {
     p_name: string;
     p_description: string;
     p_isActive: true;
+    st_id: number;
 }
 
 export type UpdateProductInput = {
@@ -53,6 +54,7 @@ export type UpdateProductInput = {
     p_name: string;
     p_description: string;
     p_isActive: true;
+    st_id: number;
 
 }
 
@@ -67,6 +69,7 @@ export type ImageProductRow = {
 export type SubmitPayload = {
     p_id: number | null;
     e_id: number;
+    st_id: number;
     optionItems: {
         poi_id?: number;
         otype_id: number;
@@ -135,4 +138,9 @@ export type OptionVariantDetailResponse = {
         on_hand: number;
         reserved_qty: number;
     }[];
+};
+
+export type VariantImageRow = {
+    pv_id: number;
+    image_url: string | null;
 };

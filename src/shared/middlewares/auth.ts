@@ -19,6 +19,7 @@ export function Auth(req: Request, res: Response, next: NextFunction) {
 
         const decoded = jwt.verify(token, secret) as any;
         req.empId = decoded.empId;
+        req.storeId = decoded.storeId;
 
         next();
     } catch (err) {

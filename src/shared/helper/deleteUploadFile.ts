@@ -34,3 +34,31 @@ export async function removePhysicalFile(filePath: string) {
         }
     }
 }
+
+
+
+// ลบข้อมูลทั้งหมด
+export async function deletePhysicalFile(filePath?: string | null) {
+    if (!filePath) return;
+
+    const normalizedPath = filePath
+        .replace(/\\/g, "/")
+        .replace(/^https?:\/\/[^/]+\/api\//, "") // ตัด http://localhost:5000/api/
+        .replace(/^\/+/, "");
+
+    if (!normalizedPath.startsWith("uploads/")) return;
+
+    try {
+        const fullPath = path.join(process.cwd(), "public", normalizedPath);
+        await fs.unlink(fullPath);
+    } catch (error: any) {
+        if (error.code !== "ENOENT") {
+            throw error;
+        }
+    }
+}
+
+export async function deleteManyPhysicalFiles(paths: (string | null | undefined)[]) {
+    const uniquePaths = [...new Set(paths.filter(Boolean))];
+    await Promise.all(uniquePaths.map((p) => deletePhysicalFile(p)));
+}

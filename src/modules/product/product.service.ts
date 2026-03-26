@@ -1,14 +1,15 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
 
-import type { CreateProductInput, ImageProductRow, OptionVariantDetailResponse, ProductDTO, ProductLanges, SubmitPayload, UpdateProductInput } from "./product.type.js";
-import { ApiError, isDupError } from "../../shared/errors/ApiError.js";
+import type { CreateProductInput, ImageProductRow, OptionVariantDetailResponse, ProductDTO, ProductLanges, SubmitPayload, UpdateProductInput, VariantImageRow } from "./product.type.js";
+import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 
 import { translateProductFields } from "../../shared/translate/translateProductFields.js";
 import { translateLexicalContent } from "../../shared/utils/ImageSrc/translateLexicalContent.js";
 import { deleteVariantImage, removePhysicalFile } from "../../shared/helper/deleteUploadFile.js";
 import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
+import { extractImageSrcsFromLexical } from "../../shared/utils/ฺBase64Image/Lexical/extractImageSrcsFromLexical.js";
 
 export async function getProductName(p_code: string): Promise<ProductDTO | null> {
     const [rows] = await pool.query<(RowDataPacket[]) & ProductDTO[]>(`SELECT * FROM Products WHERE p_code = ?`, [p_code]);
@@ -155,6 +156,8 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
             b_id: input.b_id,
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
+            st_id: input.st_id,
+
         }
         const [masterRes] = await conn.query<ResultSetHeader>(
             "INSERT INTO Products SET ?", masterData
@@ -257,6 +260,7 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             p_update_at: new Date(),
+            st_id: input.st_id,
         };
 
         await conn.query<ResultSetHeader>(
@@ -414,7 +418,7 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
     try {
         await conn.beginTransaction();
 
-        const { p_id, optionItems, variants, variantOptionItems, inventory, e_id } = data;
+        const { p_id, optionItems, variants, variantOptionItems, inventory, e_id, st_id } = data;
 
         if (!p_id) {
             throw new Error("p_id is required");
@@ -523,8 +527,7 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
             if (!incomingOptionTypeSet.has(otype_id)) {
                 // ลบ mapping ก่อน
                 await conn.query(
-                    `DELETE voi
-                     FROM VariantOptionItems voi
+                    `DELETE voi FROM VariantOptionItems voi
                      INNER JOIN ProductOptionItems poi ON poi.poi_id = voi.poi_id
                      WHERE poi.potn_id = ?`,
                     [potn_id]
@@ -637,9 +640,10 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
                         is_default,
                         image_url,
                         unit_id,
-                        e_id
+                        e_id,
+                        st_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? ,?)`,
                     [
                         p_id,
                         v.pv_sku,
@@ -654,6 +658,7 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
                         v.image_url,
                         v.unit_id ?? 1,
                         e_id,
+                        st_id,
                     ]
                 );
 
@@ -793,6 +798,139 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
             throw new ApiError(409, CommonMessages.isExits);
         }
         throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function deleteProduct(p_id: number): Promise<string[]> {
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        // 1) ตรวจว่ามี product จริงไหม
+        const [productRows] = await conn.query<RowDataPacket[]>(
+            `SELECT p_id FROM Products WHERE p_id = ? LIMIT 1`,
+            [p_id]
+        );
+
+        if (productRows.length === 0) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+
+        // 2) gather รูปทั้งหมดก่อนลบ
+        const [productImages] = await conn.query<ImageProductRow[] & RowDataPacket[]>(
+            `SELECT ip_id, ip_image_url
+             FROM ImageProduct
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        const [productLangs] = await conn.query<ProductLanges[] & RowDataPacket[]>(
+            `SELECT pl_id, p_description
+             FROM ProductLangs
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        const [variantImages] = await conn.query<VariantImageRow[] & RowDataPacket[]>(
+            `SELECT pv_id, image_url
+             FROM ProductVariants
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        const imagePaths: string[] = [
+            ...productImages.map((img) => img.ip_image_url),
+            ...variantImages.map((v) => v.image_url).filter(Boolean) as string[],
+            ...productLangs.flatMap((lang) => extractImageSrcsFromLexical(lang.p_description)),
+        ];
+
+        // 3) ลบ table ลูกก่อน
+        // หมายเหตุ: ปรับตาม schema จริงของคุณ
+
+        // inventory ของ variant
+        await conn.query(
+            `DELETE inv
+             FROM Inventorys inv
+             INNER JOIN ProductVariants pv ON pv.pv_id = inv.pv_id
+             WHERE pv.p_id = ?`,
+            [p_id]
+        );
+
+        // mapping variant option
+        await conn.query(
+            `DELETE voi
+             FROM VariantOptionItems voi
+             INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id
+             WHERE pv.p_id = ?`,
+            [p_id]
+        );
+
+        // variants
+        await conn.query(
+            `DELETE FROM ProductVariants
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        // option items / option groups ของ product
+        // ปรับชื่อตารางตามจริงของคุณ
+        await conn.query(
+            `DELETE poi
+             FROM ProductOptionItems poi
+             INNER JOIN ProductOptions po ON po.potn_id = poi.potn_id
+             WHERE po.p_id = ?`,
+            [p_id]
+        );
+
+        await conn.query(
+            `DELETE FROM ProductOptions
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        // รูปสินค้า
+        await conn.query(
+            `DELETE FROM ImageProduct
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        // tag map
+        await conn.query(
+            `DELETE FROM ProductTagMaps
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        // ภาษาของสินค้า
+        await conn.query(
+            `DELETE FROM ProductLangs
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        // สุดท้าย product แม่
+        await conn.query(
+            `DELETE FROM Products
+             WHERE p_id = ?`,
+            [p_id]
+        );
+
+        await conn.commit();
+
+        // คืน path รูปออกไปให้ controller ไปค่อยลบไฟล์จริงหลัง commit
+        return [...new Set(imagePaths)];
+    } catch (err) {
+        await conn.rollback();
+
+        if (isFkConstraintError(err)) {
+            throw new ApiError(409, CommonMessages.used);
+        }
+
+        throw err;
     } finally {
         conn.release();
     }
