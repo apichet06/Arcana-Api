@@ -19,7 +19,6 @@ export const list = asyncHandler(async (_req, res) => {
 export const create = asyncHandler(async (req, res) => {
     const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
 
-
     const files = (req.files as Express.Multer.File[]) ?? [];
 
     let images: string[] = [];
@@ -67,7 +66,8 @@ export const create = asyncHandler(async (req, res) => {
         ptag_id,
         ctl_id: Number(ctl_id),
         ps_id: Number(ps_id),
-        p_isActive: p_isActive,
+        p_isActive: p_isActive ?? true,
+        p_isAccept: storeId !== 1 ? false : true,
         images,
         e_id: empId,
         st_id: storeId,
@@ -87,7 +87,6 @@ export const update = asyncHandler(async (req, res) => {
     const emp_id = Number(req.empId);
     const storeId = Number(req.storeId);
 
-
     const files = (req.files as Express.Multer.File[]) ?? [];
 
     const rows = await products.getProductById(pl_id);
@@ -104,7 +103,17 @@ export const update = asyncHandler(async (req, res) => {
 
     const imagesToDelete = getImagesToDelete(oldDescription, transformedDescription);
 
-    const data = { p_title, p_name, p_description: transformedDescription, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, e_id: emp_id, st_id: storeId }
+    const p_isAccept = storeId !== 1 ? false : true;
+    const reason = null
+    const p_isAcceptDate = null
+    const p_isAcceptBy = null
+
+    const data = {
+        p_title, p_name, p_description: transformedDescription, c_id, b_id,
+        ptag_id, ctl_id, ps_id, e_id: emp_id, st_id: storeId, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy
+    };
+
+
     await products.UpdateProducts(pl_id, data, files);
     const otherDescriptions = await products.getOtherDescriptionsByProductId(rows.p_id, pl_id);
     const safeToDelete = filterUnusedImages(imagesToDelete, otherDescriptions);
@@ -136,6 +145,11 @@ export const createOptionVariant = asyncHandler(async (req, res) => {
     data.p_id = Number(req.params.p_id);
     data.e_id = emptId;
     data.st_id = storeId;
+    data.p_isAcceptDate = null;
+    data.p_isAcceptBy = null;
+    data.reason = null;
+    data.p_isAccept = storeId !== 1 ? false : true;
+
 
     const files = req.files as Express.Multer.File[] | undefined;
 

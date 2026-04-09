@@ -78,7 +78,7 @@ export const update = asyncHandler(async (req, res) => {
 export const deleteStore = asyncHandler(async (req, res) => {
     const { st_id } = req.params;
     const data = await store.getStoreById(Number(st_id));
-    console.log("ข้อมูลร้านค้าที่จะลบ:", data);
+
     if (!data) {
         return res.status(404).json({ message: CommonMessages.notFound });
     }

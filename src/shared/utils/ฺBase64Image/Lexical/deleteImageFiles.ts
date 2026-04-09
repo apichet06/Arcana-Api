@@ -14,7 +14,7 @@ export function deleteImageFiles(imageUrls: string[]) {
 
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
-                console.log("Deleted:", filePath);
+                // console.log("Deleted:", filePath);
             }
         } catch (error) {
             console.error("deleteImageFiles error:", error);

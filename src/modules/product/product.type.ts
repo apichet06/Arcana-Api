@@ -38,7 +38,8 @@ export type CreateProductInput = {
     p_title: string;
     p_name: string;
     p_description: string;
-    p_isActive: true;
+    p_isActive: boolean;
+    p_isAccept: boolean;
     st_id: number;
 }
 
@@ -49,13 +50,15 @@ export type UpdateProductInput = {
     ptag_id: number[];
     ctl_id: number;
     ps_id: number;
-    // images: string[] | null;
     p_title: string;
     p_name: string;
     p_description: string;
-    p_isActive: true;
     st_id: number;
-
+    p_isActive: boolean;
+    p_isAccept: boolean;
+    reason: string | null;
+    p_isAcceptDate: string | null;
+    p_isAcceptBy: number | null;
 }
 
 export type ImageProductRow = {
@@ -70,6 +73,10 @@ export type SubmitPayload = {
     p_id: number | null;
     e_id: number;
     st_id: number;
+    reason: string | null;
+    p_isAcceptDate: string | null;
+    p_isAcceptBy: number | null;
+    p_isAccept: boolean;
     optionItems: {
         poi_id?: number;
         otype_id: number;

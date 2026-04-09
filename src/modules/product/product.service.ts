@@ -11,6 +11,8 @@ import { deleteVariantImage, removePhysicalFile } from "../../shared/helper/dele
 import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
 import { extractImageSrcsFromLexical } from "../../shared/utils/ฺBase64Image/Lexical/extractImageSrcsFromLexical.js";
 
+
+
 export async function getProductName(p_code: string): Promise<ProductDTO | null> {
     const [rows] = await pool.query<(RowDataPacket[]) & ProductDTO[]>(`SELECT * FROM Products WHERE p_code = ?`, [p_code]);
     return rows[0] || null;
@@ -152,11 +154,13 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
             e_id: input.e_id,
             p_code: p_code,
             p_isActive: input.p_isActive,
+            p_isAccept: input.p_isAccept,
             c_id: input.c_id,
             b_id: input.b_id,
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             st_id: input.st_id,
+
 
         }
         const [masterRes] = await conn.query<ResultSetHeader>(
@@ -211,10 +215,7 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
     try {
         await conn.beginTransaction();
 
-        const [langRows]: any = await conn.query(
-            "SELECT p_id FROM ProductLangs WHERE pl_id = ? LIMIT 1",
-            [pl_id]
-        );
+        const [langRows]: any = await conn.query("SELECT p_id FROM ProductLangs WHERE pl_id = ? LIMIT 1", [pl_id]);
 
         if (!langRows.length) {
             throw new ApiError(404, CommonMessages.notFound);
@@ -230,10 +231,7 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
         await conn.query("DELETE FROM ProductTagMaps WHERE p_id = ?", [p_id]);
 
         if (prdTagMaps.length > 0) {
-            await conn.query(
-                "INSERT INTO ProductTagMaps (p_id, ptag_id) VALUES ?",
-                [prdTagMaps]
-            );
+            await conn.query("INSERT INTO ProductTagMaps (p_id, ptag_id) VALUES ?", [prdTagMaps]);
         }
 
         // -----------------------------
@@ -245,28 +243,26 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             p_description: input.p_description,
         };
 
-        await conn.query<ResultSetHeader>(
-            "UPDATE ProductLangs SET ? WHERE pl_id = ?",
-            [masterDataProductlang, pl_id]
-        );
+        await conn.query<ResultSetHeader>("UPDATE ProductLangs SET ? WHERE pl_id = ?", [masterDataProductlang, pl_id]);
 
         // -----------------------------
         // 3) update Products
         // -----------------------------
         const masterDataProduct = {
-            p_isActive: input.p_isActive,
             c_id: input.c_id,
             b_id: input.b_id,
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             p_update_at: new Date(),
             st_id: input.st_id,
+            p_isActive: input.p_isActive,
+            p_isAccept: input.p_isAccept,
+            reason: input.reason,
+            p_isAcceptBy: input.p_isAcceptBy,
+            p_isAcceptDate: input.p_isAcceptDate
         };
 
-        await conn.query<ResultSetHeader>(
-            "UPDATE Products SET ? WHERE p_id = ?",
-            [masterDataProduct, p_id]
-        );
+        await conn.query<ResultSetHeader>("UPDATE Products SET ? WHERE p_id = ?", [masterDataProduct, p_id]);
 
         // -----------------------------
         // 4) ถ้ามีรูปใหม่ -> ลบรูปเก่า + insert รูปใหม่
@@ -300,8 +296,8 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
                 uploadedPaths.push(normalizedPath);
 
                 await conn.query<ResultSetHeader>(
-                    `INSERT INTO ImageProduct (ip_image_url, is_primary, p_id, ip_crdeate_at)
-                     VALUES (?, ?, ?, NOW())`,
+                    `INSERT INTO ImageProduct (ip_image_url, is_primary, p_id )
+                     VALUES (?, ?, ?)`,
                     [normalizedPath, index === 0 ? 1 : null, p_id]
                 );
             }
@@ -327,11 +323,7 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
     const conn = await pool.getConnection();
     try {
         const [[productRow]] = await conn.query<RowDataPacket[]>(
-            `SELECT p_id, e_id
-            FROM Products
-            WHERE p_id = ?`,
-            [p_id]
-        );
+            `SELECT p_id, e_id FROM Products WHERE p_id = ?`, [p_id]);
 
         if (!productRow) return null;
 
@@ -342,14 +334,9 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
             po.otype_id, 
             poi.poi_value
             FROM ProductOptions po
-            INNER JOIN ProductOptionItems poi
-                ON po.potn_id = poi.potn_id
-            WHERE po.p_id = ?
-            ORDER BY poi.poi_id ASC`,
-            [p_id]
+            INNER JOIN ProductOptionItems poi ON po.potn_id = poi.potn_id WHERE po.p_id = ?
+            ORDER BY poi.poi_id ASC`, [p_id]
         );
-
-
 
 
         const [variants] = await conn.query<RowDataPacket[]>(
@@ -366,10 +353,7 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
             pv.is_default,
             pv.image_url,
             pv.unit_id
-            FROM ProductVariants pv
-            WHERE pv.p_id = ?
-            ORDER BY pv.pv_id ASC`,
-            [p_id]
+            FROM ProductVariants pv WHERE pv.p_id = ? ORDER BY pv.pv_id ASC`, [p_id]
         );
 
         const [variantOptionItems] = await conn.query<RowDataPacket[]>(
@@ -377,11 +361,8 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
             voi.pv_id,
             voi.poi_id
             FROM VariantOptionItems voi
-            INNER JOIN ProductVariants pv
-                ON pv.pv_id = voi.pv_id
-            WHERE pv.p_id = ?
-            ORDER BY voi.pv_id ASC, voi.poi_id ASC`,
-            [p_id]
+            INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id WHERE pv.p_id = ?
+            ORDER BY voi.pv_id ASC, voi.poi_id ASC`, [p_id]
         );
 
         const [inventory] = await conn.query<RowDataPacket[]>(
@@ -391,12 +372,9 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
             i.loc_id,
             i.on_hand,
             i.reserved_qty
-            FROM Inventorys i
-            INNER JOIN ProductVariants pv
-                ON pv.pv_id = i.pv_id
+            FROM Inventorys i INNER JOIN ProductVariants pv ON pv.pv_id = i.pv_id
             WHERE pv.p_id = ?
-            ORDER BY i.inv_id ASC`,
-            [p_id]
+            ORDER BY i.inv_id ASC`, [p_id]
         );
 
         return {
@@ -695,7 +673,9 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
         );
 
         const [existingVariantOptionRows] = await conn.query<RowDataPacket[]>(
-            `SELECT voi.pv_id, voi.poi_id FROM VariantOptionItems voi INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id WHERE pv.p_id = ?`, [p_id]
+            `SELECT voi.pv_id, voi.poi_id FROM VariantOptionItems voi 
+            INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id 
+            WHERE pv.p_id = ?`, [p_id]
         );
 
         // 4.1 delete removed pairs
@@ -704,7 +684,7 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
 
             if (!incomingPairSet.has(key)) {
                 await conn.query(
-                    `DELETE FROM VariantOptionItems  WHERE pv_id = ? AND poi_id = ?`, [row.pv_id, row.poi_id]
+                    `DELETE FROM VariantOptionItems WHERE pv_id = ? AND poi_id = ?`, [row.pv_id, row.poi_id]
                 );
             }
         }
@@ -749,12 +729,8 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
         );
 
         const [existingInventoryRows] = await conn.query<RowDataPacket[]>(
-            `SELECT i.inv_id, i.pv_id, i.loc_id
-             FROM Inventorys i
-             INNER JOIN ProductVariants pv ON pv.pv_id = i.pv_id
-             WHERE pv.p_id = ?`,
-            [p_id]
-        );
+            `SELECT i.inv_id, i.pv_id, i.loc_id FROM Inventorys i
+             INNER JOIN ProductVariants pv ON pv.pv_id = i.pv_id WHERE pv.p_id = ?`, [p_id]);
 
         // 5.1 delete removed inventory rows
         for (const row of existingInventoryRows) {
@@ -788,6 +764,16 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
             }
         }
 
+        const produtMaster = {
+            p_isAcceptDate: data.p_isAcceptDate,
+            p_isAcceptBy: data.p_isAcceptBy,
+            reason: data.reason,
+            p_isAccept: data.p_isAccept,
+        }
+
+
+        await conn.query(`UPDATE Products SET ? WHERE p_id = ?`, [produtMaster, p_id]);
+
         await conn.commit();
         for (const filePath of filesToDelete) {
             deleteVariantImage(filePath);
@@ -811,8 +797,7 @@ export async function deleteProduct(p_id: number): Promise<string[]> {
 
         // 1) ตรวจว่ามี product จริงไหม
         const [productRows] = await conn.query<RowDataPacket[]>(
-            `SELECT p_id FROM Products WHERE p_id = ? LIMIT 1`,
-            [p_id]
+            `SELECT p_id FROM Products WHERE p_id = ? LIMIT 1`, [p_id]
         );
 
         if (productRows.length === 0) {
@@ -821,24 +806,15 @@ export async function deleteProduct(p_id: number): Promise<string[]> {
 
         // 2) gather รูปทั้งหมดก่อนลบ
         const [productImages] = await conn.query<ImageProductRow[] & RowDataPacket[]>(
-            `SELECT ip_id, ip_image_url
-             FROM ImageProduct
-             WHERE p_id = ?`,
-            [p_id]
+            `SELECT ip_id, ip_image_url  FROM ImageProduct  WHERE p_id = ?`, [p_id]
         );
 
         const [productLangs] = await conn.query<ProductLanges[] & RowDataPacket[]>(
-            `SELECT pl_id, p_description
-             FROM ProductLangs
-             WHERE p_id = ?`,
-            [p_id]
+            `SELECT pl_id, p_description FROM ProductLangs  WHERE p_id = ?`, [p_id]
         );
 
         const [variantImages] = await conn.query<VariantImageRow[] & RowDataPacket[]>(
-            `SELECT pv_id, image_url
-             FROM ProductVariants
-             WHERE p_id = ?`,
-            [p_id]
+            `SELECT pv_id, image_url FROM ProductVariants  WHERE p_id = ?`, [p_id]
         );
 
         const imagePaths: string[] = [
@@ -852,72 +828,39 @@ export async function deleteProduct(p_id: number): Promise<string[]> {
 
         // inventory ของ variant
         await conn.query(
-            `DELETE inv
-             FROM Inventorys inv
+            `DELETE inv FROM Inventorys inv
              INNER JOIN ProductVariants pv ON pv.pv_id = inv.pv_id
-             WHERE pv.p_id = ?`,
-            [p_id]
-        );
+             WHERE pv.p_id = ?`, [p_id]);
 
         // mapping variant option
         await conn.query(
-            `DELETE voi
-             FROM VariantOptionItems voi
+            `DELETE voi FROM VariantOptionItems voi
              INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id
-             WHERE pv.p_id = ?`,
-            [p_id]
-        );
+             WHERE pv.p_id = ?`, [p_id]);
 
         // variants
-        await conn.query(
-            `DELETE FROM ProductVariants
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM ProductVariants WHERE p_id = ?`, [p_id]);
 
         // option items / option groups ของ product
         // ปรับชื่อตารางตามจริงของคุณ
         await conn.query(
-            `DELETE poi
-             FROM ProductOptionItems poi
+            `DELETE poi FROM ProductOptionItems poi
              INNER JOIN ProductOptions po ON po.potn_id = poi.potn_id
-             WHERE po.p_id = ?`,
-            [p_id]
-        );
+             WHERE po.p_id = ?`, [p_id]);
 
-        await conn.query(
-            `DELETE FROM ProductOptions
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM ProductOptions WHERE p_id = ?`, [p_id]);
 
         // รูปสินค้า
-        await conn.query(
-            `DELETE FROM ImageProduct
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM ImageProduct  WHERE p_id = ?`, [p_id]);
 
         // tag map
-        await conn.query(
-            `DELETE FROM ProductTagMaps
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM ProductTagMaps  WHERE p_id = ?`, [p_id]);
 
         // ภาษาของสินค้า
-        await conn.query(
-            `DELETE FROM ProductLangs
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM ProductLangs WHERE p_id = ?`, [p_id]);
 
         // สุดท้าย product แม่
-        await conn.query(
-            `DELETE FROM Products
-             WHERE p_id = ?`,
-            [p_id]
-        );
+        await conn.query(`DELETE FROM Products  WHERE p_id = ?`, [p_id]);
 
         await conn.commit();
 
@@ -927,6 +870,7 @@ export async function deleteProduct(p_id: number): Promise<string[]> {
         await conn.rollback();
 
         if (isFkConstraintError(err)) {
+
             throw new ApiError(409, CommonMessages.used);
         }
 

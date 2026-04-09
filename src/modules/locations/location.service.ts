@@ -1,7 +1,7 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
 import type { CreateLocationInput, LocationsDTO, UpdateLocationInput } from "./location.type.js";
-import { ApiError, isDupError } from "../../shared/errors/ApiError.js";
+import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 
@@ -116,10 +116,11 @@ export async function DeleteLocation(loc_id: number): Promise<void> {
         }
 
         await conn.commit();
+        return;
     } catch (err) {
         await conn.rollback();
-        if (isDupError(err)) {
-            throw new ApiError(409, CommonMessages.isExits);
+        if (isFkConstraintError(err)) {
+            throw new ApiError(409, CommonMessages.used);
         }
         throw err;
     } finally {

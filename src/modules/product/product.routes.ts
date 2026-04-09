@@ -15,9 +15,9 @@ const upload = multer({
     },
 });
 
+productRouter.use(Auth);
 productRouter.get("/", controller.list);
 productRouter.get("/:p_id/variants", controller.getOptionVariant);
-productRouter.use(Auth);
 productRouter.post("/", upload.array("images", 3), controller.create);
 productRouter.put("/:pl_id", upload.array("images", 3), controller.update);
 productRouter.delete("/:p_id", controller.remove);

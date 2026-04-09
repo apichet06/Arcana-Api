@@ -8,8 +8,8 @@ export async function list(st_id: number, log_code: string): Promise<StockProduc
     const [rows] = await pool.query<(RowDataPacket[]) & StockProductResponse[]>(`
         SELECT a.*,
             (SELECT GROUP_CONCAT(g.poi_value ORDER BY f.poi_id SEPARATOR '/')
-                FROM system_Arcana.VariantOptionItems f
-                JOIN system_Arcana.ProductOptionItems g ON g.poi_id = f.poi_id
+                FROM VariantOptionItems f
+                JOIN ProductOptionItems g ON g.poi_id = f.poi_id
                 WHERE f.pv_id = a.pv_id
             ) AS poi_values,
             c.ul_name,
@@ -19,12 +19,12 @@ export async function list(st_id: number, log_code: string): Promise<StockProduc
             d.loc_id,
             g.name_in_thai as province,
             d.inv_id
-        FROM system_Arcana.ProductVariants a
-        INNER JOIN system_Arcana.Units b ON a.unit_id = b.u_id
-        INNER JOIN system_Arcana.UnitLangs c ON b.u_id = c.u_id
-        INNER JOIN system_Arcana.Inventorys d ON a.pv_id = d.pv_id
-        INNER JOIN system_Arcana.Locations f ON f.loc_id = d.loc_id
-        INNER JOIN system_Arcana.Provinces g ON f.Provinces_id = g.id
+        FROM ProductVariants a
+        INNER JOIN Units b ON a.unit_id = b.u_id
+        INNER JOIN UnitLangs c ON b.u_id = c.u_id
+        INNER JOIN Inventorys d ON a.pv_id = d.pv_id
+        INNER JOIN Locations f ON f.loc_id = d.loc_id
+        INNER JOIN Provinces g ON f.Provinces_id = g.id
             WHERE c.lg_code = ? AND a.st_id = ?
             ORDER BY a.pv_id DESC`, [log_code, st_id]);
     return rows;
@@ -126,8 +126,8 @@ export async function reduceStock(data: ReduceStoskProduct): Promise<number> {
 export async function ListInventoryLog(st_id: number, inv_id: number): Promise<InventoryLogResponse[]> {
     const [rows] = await pool.query<(RowDataPacket[]) & InventoryLogResponse[]>(`
                     SELECT a.*,(SELECT GROUP_CONCAT(g.poi_value ORDER BY f.poi_id SEPARATOR '/')
-                            FROM system_Arcana.VariantOptionItems f
-                            JOIN system_Arcana.ProductOptionItems g ON g.poi_id = f.poi_id
+                            FROM VariantOptionItems f
+                            JOIN ProductOptionItems g ON g.poi_id = f.poi_id
                             WHERE f.pv_id = a.pv_id
                         ) AS poi_values,c.e_firstname,b.pv_sku FROM InventoryLog a 
                         INNER JOIN ProductVariants b 

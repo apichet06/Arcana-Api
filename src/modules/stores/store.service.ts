@@ -88,6 +88,7 @@ export async function deleteStore(st_id: number): Promise<void> {
         if (res.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);
         }
+        return;
     } catch (err) {
         if (isFkConstraintError(err)) {
             throw new ApiError(409, CommonMessages.used);

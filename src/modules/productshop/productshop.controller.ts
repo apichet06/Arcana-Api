@@ -1,0 +1,15 @@
+import { asyncHandler } from "../../shared/utils/asyncHandler.js";
+import * as productShopService from "./productshop.service.js";
+
+export const listProductShop = asyncHandler(async (req, res) => {
+    const { lg_code } = req.params;
+    const data = await productShopService.getProductShop(lg_code as string);
+    res.status(200).json({ data });
+});
+
+export const getProductShopById = asyncHandler(async (req, res) => {
+    const { p_id } = req.params;
+    const lg_code = req.params.lg_code as string || "th"; // Default to 'th' if not provided
+    const data = await productShopService.getProductShopById(Number(p_id), lg_code);
+    res.status(200).json({ data });
+});

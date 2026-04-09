@@ -23,6 +23,9 @@ import { productStatus } from "./modules/productStatus/productStatus.routes.js";
 import { productRouter } from "./modules/product/product.routes.js";
 import { OptionTypeRouter } from "./modules/optionType/optiontype.routes.js";
 import { productStockRouter } from "./modules/product-addstock/product-addstock.routes.js";
+import { landingPageRouter } from "./modules/landingpage/landingpage.routes.js";
+import { acceptProductRouter } from "./modules/accept-product/accept-product.routes.js";
+import { productShopRouter } from "./modules/productshop/productshop.routes.js";
 
 export function createApp() {
     const app = express();
@@ -43,6 +46,7 @@ export function createApp() {
             },
         })
     );
+
     app.use("/api/users", usersRouters);
     app.use("/api/catalogs", catalogRouters);
     app.use("/api/categorys", categoryRouters);
@@ -57,6 +61,9 @@ export function createApp() {
     app.use("/api/products", productRouter)
     app.use("/api/optionTypes", OptionTypeRouter)
     app.use("/api/produtStock", productStockRouter)
+    app.use("/api/landingPage", landingPageRouter)
+    app.use("/api/acceptProduct", acceptProductRouter)
+    app.use("/api/productShop", productShopRouter)
 
 
     app.use(notFound);

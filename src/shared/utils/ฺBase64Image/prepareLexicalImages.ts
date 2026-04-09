@@ -14,13 +14,13 @@ export function prepareLexicalImages(
 ): number {
     let replacedCount = 0;
 
-    console.log("visiting node type:", node?.type);
+    // console.log("visiting node type:", node?.type);
 
     if (node.type === "image" && typeof node.src === "string") {
-        console.log("found image src:", node.src.slice(0, 30));
+        // console.log("found image src:", node.src.slice(0, 30));
 
         if (isBase64Image(node.src)) {
-            console.log("base64 matched");
+            // console.log("base64 matched");
 
             const saved = saveBase64Image({
                 base64: node.src,
@@ -31,7 +31,7 @@ export function prepareLexicalImages(
             node.src = saved.fullUrl;
             replacedCount++;
 
-            console.log("replaced src:", node.src);
+            // console.log("replaced src:", node.src);
         } else {
             console.log("not base64");
         }
