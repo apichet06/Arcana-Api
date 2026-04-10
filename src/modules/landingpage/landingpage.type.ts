@@ -28,6 +28,10 @@ export type LandingpageInput = {
 
 }
 
+export type SlugDataresponse = {
+    lp_slug: string;
+}
+
 export type LandingpageUpdateInput = {
     lp_id: number;
     lp_title: string;

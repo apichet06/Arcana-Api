@@ -1,6 +1,6 @@
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
-import type { LandingpageDTO, LandingpageInput, LandingpageUpdateInput } from "./landingpage.type.js"
+import type { LandingpageDTO, LandingpageInput, LandingpageUpdateInput, SlugDataresponse } from "./landingpage.type.js"
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 import { translateLexicalContent } from "../../shared/utils/ImageSrc/translateLexicalContent.js";
@@ -211,7 +211,21 @@ export async function GetLandingPageProductId(
     }
 }
 
+export async function GetLandingPagesluge(): Promise<SlugDataresponse[]> {
+    const conn = await pool.getConnection()
 
+    try {
+        const [rows] = await conn.query<(RowDataPacket & SlugDataresponse)[]>(
+            `SELECT lp_slug FROM LandingPages`
+        )
+
+        return rows
+    } catch (err) {
+        throw err
+    } finally {
+        conn.release()
+    }
+}
 
 
 

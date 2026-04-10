@@ -11,6 +11,12 @@ export const list = asyncHandler(async (_req, res) => {
     res.status(200).json({ data });
 });
 
+export const listBylgCode = asyncHandler(async (_req, res) => {
+    const { lg_code } = _req.params;
+    const data = await category.getCategoryByLgCode(lg_code as string);
+    res.status(200).json({ data });
+});
+
 export const create = asyncHandler(async (req, res) => {
     const { cl_name, ctl_id } = req.body
     const empId = Number(req.empId);

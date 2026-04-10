@@ -121,3 +121,7 @@ export const GetUniqueSlug = asyncHandler(async (req, res) => {
     res.status(200).json({ data });
 })
 
+export const GetLandingPagesluge = asyncHandler(async (req, res) => {
+    const data = await landingpage.GetLandingPagesluge();
+    res.status(200).json({ data });
+})

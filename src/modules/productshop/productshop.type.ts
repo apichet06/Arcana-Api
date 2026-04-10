@@ -1,22 +1,24 @@
 
 export type ProductShopDTO = {
-    p_id: number;
-    p_isActive: boolean;
-    p_name: string;
-    p_title: string;
-    ip_image_url: string | null;
-    min_price: number;
-    max_price: number;
-    max_discount: number;
-    c_id: number;
-    has_price_range: 0 | 1;
-    st_id: number;
-    st_company_name: string;
+    p_id: number
+    p_isActive: boolean
+    name: string
+    title: string
+    ip_image_url: string | null
+    min_price: number
+    max_price: number
+    discount: number
+    c_id: number
+    ctl_id: number
+    ctl_name: string
+    b_id: number
+    b_name: string
+    has_price_range: 0 | 1
     tags: {
-        ptag_id: number;
-        ptag_name: string;
-    }[];
-};
+        ptag_id: number
+        ptag_name: string
+    }[]
+}
 
 
 export type ProductTagDTO = {

@@ -3,7 +3,19 @@ import * as productShopService from "./productshop.service.js";
 
 export const listProductShop = asyncHandler(async (req, res) => {
     const { lg_code } = req.params;
-    const data = await productShopService.getProductShop(lg_code as string);
+
+    const keyword = String(req.query.keyword ?? "").trim()
+    const sort = String(req.query.sort ?? "all").trim()
+    const page = Number(req.query.page ?? 1)
+    const limit = Number(req.query.limit ?? 12)
+
+    const data = await productShopService.getProductShop({
+        lg_code: lg_code as string,
+        keyword,
+        sort,
+        page,
+        limit,
+    });
     res.status(200).json({ data });
 });
 

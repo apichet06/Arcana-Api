@@ -2,13 +2,147 @@ import type { RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
 import type { InventoryStoreDTO, LandignPageNamgeDTO, ProductImageDTO, ProductOptionGroupDTO, ProductShopByIdResponse, ProductShopDetailDTO, ProductShopDTO, ProductTagDTO, ProductVariantDTO } from "./productshop.type.js";
 
-export async function getProductShop(lg_code: string): Promise<ProductShopDTO[]> {
-    const conn = await pool.getConnection();
+type GetProductShopParams = {
+    lg_code: string
+    keyword?: string
+    sort?: string
+    page?: number
+    limit?: number
+}
+function normalizeSort(sort?: string) {
+    switch (sort) {
+        case "new":
+        case "popular":
+        case "featured":
+        case "price-low":
+        case "price-high":
+        case "all":
+            return sort
+        default:
+            return "all"
+    }
+}
+
+type ProductShopResponse = {
+    items: ProductShopDTO[]
+    pagination: {
+        total: number
+        page: number
+        limit: number
+        totalPages: number
+    }
+}
+
+
+export async function getProductShop({
+    lg_code,
+    keyword = "",
+    sort = "all",
+    page = 1,
+    limit = 12,
+}: GetProductShopParams): Promise<ProductShopResponse> {
+    const conn = await pool.getConnection()
 
     try {
-        const [rows] = await conn.query<(RowDataPacket & ProductShopDTO)[]>(
-            ` 
-         SELECT 
+        const safePage = Number.isFinite(page) && page > 0 ? page : 1
+        const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 12
+        const offset = (safePage - 1) * safeLimit
+        const safeSort = normalizeSort(sort)
+        const trimmedKeyword = keyword.trim()
+
+        const whereConditions: string[] = [`b.lg_code = ?`]
+        const queryParams: Array<string | number> = [lg_code]
+
+        if (trimmedKeyword) {
+            whereConditions.push(`
+                (
+                    b.p_name LIKE ?
+                    OR b.p_title LIKE ?
+                    OR f.b_name LIKE ?
+                    OR e.ctl_name LIKE ?
+                )
+            `)
+
+            const keywordLike = `%${trimmedKeyword}%`
+            queryParams.push(keywordLike, keywordLike, keywordLike, keywordLike)
+        }
+
+        if (safeSort === "new") {
+            whereConditions.push(`
+                EXISTS (
+                    SELECT 1
+                    FROM ProductTagMaps ptm
+                    WHERE ptm.p_id = a.p_id
+                      AND ptm.ptag_id = 2
+                )
+            `)
+        }
+
+        if (safeSort === "popular") {
+            whereConditions.push(`
+                EXISTS (
+                    SELECT 1
+                    FROM ProductTagMaps ptm
+                    WHERE ptm.p_id = a.p_id
+                      AND ptm.ptag_id = 1
+                )
+            `)
+        }
+
+        if (safeSort === "featured") {
+            whereConditions.push(`
+                EXISTS (
+                    SELECT 1
+                    FROM ProductTagMaps ptm
+                    WHERE ptm.p_id = a.p_id
+                      AND ptm.ptag_id = 3
+                )
+            `)
+        }
+
+        // ถ้าคุณอยากโชว์เฉพาะสินค้าที่ active ให้เปิดบรรทัดนี้
+        whereConditions.push(`a.p_isActive = 1`)
+
+        const whereSql = whereConditions.length > 0
+            ? `WHERE ${whereConditions.join(" AND ")}`
+            : ""
+
+        let orderBySql = `ORDER BY a.p_id DESC`
+
+        if (safeSort === "price-low") {
+            orderBySql = `ORDER BY min_price ASC, a.p_id DESC`
+        } else if (safeSort === "price-high") {
+            orderBySql = `ORDER BY max_price DESC, a.p_id DESC`
+        }
+
+        const countSql = `
+            SELECT COUNT(*) AS total
+            FROM (
+                SELECT a.p_id
+                FROM Products a
+                INNER JOIN ProductLangs b
+                    ON a.p_id = b.p_id
+                INNER JOIN ProductVariants d
+                    ON d.p_id = a.p_id
+                INNER JOIN Catalog e
+                    ON e.ctl_id = a.ctl_id
+                INNER JOIN Brands f
+                    ON f.b_id = a.b_id
+                ${whereSql}
+                GROUP BY a.p_id
+            ) counted
+        `
+
+        const [countRows] = await conn.query<(RowDataPacket & { total: number })[]>(
+            countSql,
+            queryParams
+        )
+
+        const total = countRows[0]?.total ?? 0
+        const totalPages = Math.max(1, Math.ceil(total / safeLimit))
+
+        const listSql = `
+            SELECT 
                 a.p_id,
                 a.p_isActive,
                 b.p_name AS name,
@@ -39,27 +173,45 @@ export async function getProductShop(lg_code: string): Promise<ProductShopDTO[]>
                 )
             INNER JOIN ProductVariants d 
                 ON d.p_id = a.p_id
-			INNER JOIN Catalog e 
+            INNER JOIN Catalog e 
                 ON e.ctl_id = a.ctl_id
             INNER JOIN Brands f 
                 ON f.b_id = a.b_id
-            WHERE b.lg_code = ?
+            ${whereSql}
             GROUP BY 
                 a.p_id,
                 a.p_isActive,
                 b.p_name,
                 b.p_title,
                 c.ip_image_url,
-                a.c_id
-            `,
-            [lg_code]
-        );
+                a.c_id,
+                e.ctl_id,
+                e.ctl_name,
+                f.b_id,
+                f.b_name
+            ${orderBySql}
+            LIMIT ?
+            OFFSET ?
+        `
+
+        const [rows] = await conn.query<(RowDataPacket & ProductShopDTO)[]>(
+            listSql,
+            [...queryParams, safeLimit, offset]
+        )
 
         if (rows.length === 0) {
-            return [];
+            return {
+                items: [],
+                pagination: {
+                    total,
+                    page: safePage,
+                    limit: safeLimit,
+                    totalPages,
+                },
+            }
         }
 
-        const productIds = rows.map((row) => row.p_id);
+        const productIds = rows.map((row) => row.p_id)
 
         const [tagRows] = await conn.query<RowDataPacket[]>(
             `
@@ -74,29 +226,41 @@ export async function getProductShop(lg_code: string): Promise<ProductShopDTO[]>
               AND e.p_id IN (?)
             `,
             [lg_code, productIds]
-        );
+        )
 
-        const tagMap = new Map<number, { ptag_id: number; ptag_name: string }[]>();
+        const tagMap = new Map<number, { ptag_id: number; ptag_name: string }[]>()
 
         for (const tag of tagRows) {
             if (!tagMap.has(tag.p_id)) {
-                tagMap.set(tag.p_id, []);
+                tagMap.set(tag.p_id, [])
             }
 
             tagMap.get(tag.p_id)!.push({
-                ptag_id: tag.ptag_id,
-                ptag_name: tag.ptag_name,
-            });
+                ptag_id: Number(tag.ptag_id),
+                ptag_name: String(tag.ptag_name),
+            })
         }
 
-        const result: ProductShopDTO[] = rows.map((row) => ({
+        const items: ProductShopDTO[] = rows.map((row) => ({
             ...row,
+            min_price: Number(row.min_price ?? 0),
+            max_price: Number(row.max_price ?? 0),
+            discount: Number(row.discount ?? 0),
+            has_price_range: Number(row.has_price_range) === 1 ? 1 : 0,
             tags: tagMap.get(row.p_id) ?? [],
-        }));
+        }))
 
-        return result;
+        return {
+            items,
+            pagination: {
+                total,
+                page: safePage,
+                limit: safeLimit,
+                totalPages,
+            },
+        }
     } finally {
-        conn.release();
+        conn.release()
     }
 }
 
@@ -111,57 +275,57 @@ export async function getProductShopById(
     try {
         const [rows] = await conn.query<(RowDataPacket & ProductShopDetailDTO)[]>(
             `
-      SELECT
-          a.p_id,
-          a.p_isActive,
-          a.st_id,
-          b.p_name AS name,
-          b.p_title AS title,
-          a.c_id,
-          e.ctl_id,
-          e.ctl_name,
-          f.b_id,
-          f.b_name,
-          b.p_description,
-          g.ps_name,
-          i.cl_name,
-          j.st_company_name,
-          j.st_image,
-          MIN(d.pv_price) AS min_price,
-          MAX(d.pv_price) AS max_price,
-          MAX(COALESCE(d.discount, 0)) AS discount,
-          CASE
-              WHEN MIN(d.pv_price) = MAX(d.pv_price) THEN 0
-              ELSE 1
-          END AS has_price_range
-      FROM Products a
-      INNER JOIN ProductLangs b
-          ON a.p_id = b.p_id
-      INNER JOIN ProductVariants d
-          ON d.p_id = a.p_id
-      INNER JOIN Catalog e
-          ON e.ctl_id = a.ctl_id
-      INNER JOIN Brands f
-          ON f.b_id = a.b_id
-      INNER JOIN ProductStatus g
-          ON g.ps_id = a.ps_id
-	  INNER JOIN Categorys h 
-          ON h.c_id = a.c_id
-	  INNER JOIN CategoryLangs i 
-          ON i.c_id = h.c_id
-	  INNER JOIN Store j 
-          ON j.st_id = a.st_id
-      WHERE a.p_id = ? AND b.lg_code = ? AND i.lg_code = ?
-      GROUP BY
-          a.p_id,
-          a.p_isActive,
-          b.p_name,
-          b.p_title,
-          a.c_id,
-          e.ctl_id,
-          e.ctl_name,
-          f.b_id,
-          f.b_name
+        SELECT
+            a.p_id,
+            a.p_isActive,
+            a.st_id,
+            b.p_name AS name,
+            b.p_title AS title,
+            a.c_id,
+            e.ctl_id,
+            e.ctl_name,
+            f.b_id,
+            f.b_name,
+            b.p_description,
+            g.ps_name,
+            i.cl_name,
+            j.st_company_name,
+            j.st_image,
+            MIN(d.pv_price) AS min_price,
+            MAX(d.pv_price) AS max_price,
+            MAX(COALESCE(d.discount, 0)) AS discount,
+            CASE
+                WHEN MIN(d.pv_price) = MAX(d.pv_price) THEN 0
+                ELSE 1
+            END AS has_price_range
+        FROM Products a
+        INNER JOIN ProductLangs b
+            ON a.p_id = b.p_id
+        INNER JOIN ProductVariants d
+            ON d.p_id = a.p_id
+        INNER JOIN Catalog e
+            ON e.ctl_id = a.ctl_id
+        INNER JOIN Brands f
+            ON f.b_id = a.b_id
+        INNER JOIN ProductStatus g
+            ON g.ps_id = a.ps_id
+        INNER JOIN Categorys h 
+            ON h.c_id = a.c_id
+        INNER JOIN CategoryLangs i 
+            ON i.c_id = h.c_id
+        INNER JOIN Store j 
+            ON j.st_id = a.st_id
+        WHERE a.p_id = ? AND b.lg_code = ? AND i.lg_code = ?
+        GROUP BY
+            a.p_id,
+            a.p_isActive,
+            b.p_name,
+            b.p_title,
+            a.c_id,
+            e.ctl_id,
+            e.ctl_name,
+            f.b_id,
+            f.b_name
       `,
             [p_id, lg_code, lg_code]
         );

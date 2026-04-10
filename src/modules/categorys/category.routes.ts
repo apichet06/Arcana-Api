@@ -7,6 +7,7 @@ export const categoryRouters = Router();
 
 
 categoryRouters.get("/", controller.list)
+categoryRouters.get("/lgcode/:lg_code", controller.listBylgCode)
 categoryRouters.use(Auth)
 categoryRouters.post("/", controller.create)
 categoryRouters.put("/:cl_id", controller.update)
