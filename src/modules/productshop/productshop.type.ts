@@ -57,23 +57,37 @@ export type ProductImageDTO = {
 };
 
 export type ProductVariantDTO = {
-    pv_id: number;
-    pv_sku: string;
-    pv_cost: number;
-    pv_price: number;
-    discount: number;
-    is_default: number;
-    image_url: string | null;
-    weight_g: number;
-    length_cm: number;
-    width_cm: number;
-    height_cm: number;
-    unit_id: number;
-    unit_name: string | null;
-    on_hand: number;
-    reserved_qty: number;
-    variant_label: string | null;
-};
+    pv_id: number
+    pv_sku: string
+    pv_cost: number
+    pv_price: number
+    discount: number
+    is_default: number
+    image_url: string | null
+    weight_g: string | null
+    length_cm: string | null
+    width_cm: string | null
+    height_cm: string | null
+    unit_id: number | null
+    unit_name: string | null
+    total_on_hand: number
+    total_reserved_qty: number
+    available_qty: number
+    variant_label: string | null
+}
+
+export type InventoryByVariantDTO = {
+    inv_id: number
+    pv_id: number
+    loc_id: number
+    st_id: number
+    location_name: string | null
+    province_name: string | null
+    on_hand: number
+    reserved_qty: number
+    available_qty: number
+}
+
 
 export type ProductOptionItemDTO = {
     poi_id: number;
@@ -105,11 +119,11 @@ export type LandignPageNamgeDTO = {
 
 
 export type ProductShopByIdResponse = {
-    product: ProductShopDetailDTO;
-    images: ProductImageDTO[];
-    variants: ProductVariantDTO[];
-    options: ProductOptionGroupDTO[];
-    InventoryStore: InventoryStoreDTO[];
-    landingPage: LandignPageNamgeDTO[];
-};
-
+    product: ProductShopDetailDTO
+    images: ProductImageDTO[]
+    variants: ProductVariantDTO[]
+    options: ProductOptionGroupDTO[]
+    InventoryStore: InventoryStoreDTO[]
+    inventoryByVariant: InventoryByVariantDTO[]
+    landingPage: LandignPageNamgeDTO[]
+}

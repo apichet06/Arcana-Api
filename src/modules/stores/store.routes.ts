@@ -7,6 +7,9 @@ export const storeRouter = Router();
 
 const upload = multer({ dest: "public/uploads/" });
 
+
+storeRouter.get("/shop/", controller.listShop);
+storeRouter.get("/shop/:st_id", controller.listShopById);
 storeRouter.use(Auth);
 storeRouter.get("/", controller.list);
 storeRouter.post("/", upload.single("st_image"), controller.create);

@@ -14,8 +14,8 @@ export const List = asyncHandler(async (req, res) => {
 })
 
 export const GetLandingPageProductId = asyncHandler(async (req, res) => {
-    const { slug } = req.params;
-    const data = await landingpage.GetLandingPageProductId(slug as string);
+    const { slug, lg_code } = req.params;
+    const data = await landingpage.GetLandingPageProductId(String(slug), String(lg_code));
     res.status(200).json({ data });
 })
 

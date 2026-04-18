@@ -48,3 +48,13 @@ export type BankDTO = {
     bk_id: number;
     bk_name: string;
 }
+
+
+export type StoreShopDTO = {
+    st_id: number;
+    st_company_name: string;
+    st_phone: string;
+    st_image: string;
+    st_email: string;
+    st_isAccept: string;
+}

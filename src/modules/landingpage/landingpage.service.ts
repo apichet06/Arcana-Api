@@ -193,14 +193,25 @@ export async function DeleteLandingPage(group_id: number): Promise<void> {
 
 
 export async function GetLandingPageProductId(
-    slug: string
+    slug: string,
+    lg_code: string
 ): Promise<LandingpageDTO | null> {
     const conn = await pool.getConnection()
 
     try {
         const [rows] = await conn.query<(RowDataPacket & LandingpageDTO)[]>(
-            `SELECT * FROM LandingPages WHERE lp_slug = ? LIMIT 1`,
-            [slug]
+            `SELECT a.*,c.p_name, 
+            MIN(d.pv_price) AS min_price,
+            MAX(d.pv_price) AS max_price,
+            MAX(COALESCE(d.discount, 0)) AS discount
+            From LandingPages a 
+            INNER JOIN Products b 
+            ON a.p_id = b.p_id
+            INNER JOIN ProductLangs c 
+            ON c.p_id = b.p_id
+            INNER JOIN ProductVariants d
+            ON d.p_id = a.p_id WHERE lp_slug = ? AND c.lg_code = ? LIMIT 1`,
+            [slug, lg_code]
         )
 
         return rows[0] ?? null

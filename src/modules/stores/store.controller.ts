@@ -11,6 +11,18 @@ export const list = asyncHandler(async (req, res) => {
     res.status(200).json({ data });
 });
 
+export const listShop = asyncHandler(async (req, res) => {
+    const data = await store.getlistStoreShop();
+    res.status(200).json({ data });
+});
+
+export const listShopById = asyncHandler(async (req, res) => {
+    const { st_id } = req.params;
+    const data = await store.getlistSroreShopById(Number(st_id));
+    res.status(200).json({ data });
+});
+
+
 export const getById = asyncHandler(async (req, res) => {
     const { st_id } = req.params;
     const data = await store.getStoreById(Number(st_id));

@@ -9,7 +9,7 @@ const upload = multer({ dest: "public/uploads/" });
 landingPageRouter.get("/slug", controller.GetLandingPagesluge);
 
 landingPageRouter.get("/slug/:slug", controller.GetUniqueSlug);
-landingPageRouter.get("/lp/:slug", controller.GetLandingPageProductId);
+landingPageRouter.get("/lp/:slug/:lg_code", controller.GetLandingPageProductId);
 landingPageRouter.use(Auth);
 landingPageRouter.get("/:st_id", controller.List);
 

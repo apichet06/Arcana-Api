@@ -1,7 +1,7 @@
 
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
-import type { BankDTO, CreateStoreInput, StoreDTO, UpdateStoreInput } from "./store.type.js";
+import type { BankDTO, CreateStoreInput, StoreDTO, StoreShopDTO, UpdateStoreInput } from "./store.type.js";
 import { ApiError, isDupError, isFkConstraintError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/index.js";
 
@@ -11,6 +11,17 @@ export async function listStores(): Promise<StoreDTO[]> {
         a.*, b.bk_name
         FROM Store a LEFT JOIN Bank b ON a.bk_id = b.bk_id order by a.st_id asc`);
     return rows;
+}
+
+export async function getlistStoreShop(): Promise<StoreShopDTO[]> {
+    const [rows] = await pool.query<(RowDataPacket[]) & StoreShopDTO[]>(`SELECT st_id, st_company_name, st_phone, st_image, st_email, st_isAccept FROM Store`);
+    return rows;
+}
+
+export async function getlistSroreShopById(st_id: number) {
+    const [rows] = await pool.query<(RowDataPacket[]) & StoreShopDTO[]>(`SELECT st_id, st_company_name, st_phone, st_image, st_email, st_isAccept FROM Store WHERE st_id = ?`, [st_id]);
+    return rows[0] || null;
+
 }
 
 export async function getStoreById(st_id: number): Promise<StoreDTO | null> {
