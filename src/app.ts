@@ -41,7 +41,7 @@ export function createApp() {
         express.static(path.join(process.cwd(), "public/uploads"), {
             setHeaders: (res) => {
                 res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-                res.setHeader("Access-Control-Allow-Origin", "*");
+                // res.setHeader("Access-Control-Allow-Origin", "*");
                 res.setHeader("Cache-Control", "public, max-age=86400");
             },
         })

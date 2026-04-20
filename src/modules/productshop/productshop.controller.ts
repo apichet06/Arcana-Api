@@ -29,10 +29,10 @@ export const getProductShopById = asyncHandler(async (req, res) => {
     res.status(200).json({ data });
 });
 
-export const getProductShopByStId = asyncHandler(async (req, res) => {
-    const { st_id } = req.params;
-    const lg_code = req.params.lg_code as string || "th";
-    const data = await productShopService.getProductShopByStId(Number(st_id), lg_code);
-    res.status(200).json({ data });
+// export const getProductShopByStId = asyncHandler(async (req, res) => {
+//     const { st_id } = req.params;
+//     const lg_code = req.params.lg_code as string || "th";
+//     const data = await productShopService.getProductShopByStId(Number(st_id), lg_code);
+//     res.status(200).json({ data });
 
-})
+// })

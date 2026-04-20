@@ -595,51 +595,51 @@ export async function getProductShopById(
 
 
 
-export async function getProductShopByStId(st_id: number, lg_code: string
-): Promise<ProductShopDTO[]> {
-    const conn = await pool.getConnection()
+// export async function getProductShopByStId(st_id: number, lg_code: string
+// ): Promise<ProductShopDTO[]> {
+//     const conn = await pool.getConnection()
 
-    try {
-        const [rows] = await conn.query<(RowDataPacket & ProductShopDTO)[]>(
-            `
-            SELECT 
-                p.p_id,
-                pl.p_name,
-                pl.p_title,
-                (
-                    SELECT ip.ip_image_url
-                    FROM ImageProduct ip
-                    WHERE ip.p_id = p.p_id
-                    ORDER BY ip.ip_id ASC
-                    LIMIT 1
-                ) AS ip_image_url,
-                MIN(pv.pv_price) AS min_price,
-                MAX(pv.pv_price) AS max_price,
-                MAX(COALESCE(pv.discount, 0)) AS discount,
-                CASE
-                    WHEN MIN(pv.pv_price) = MAX(pv.pv_price) THEN 0
-                    ELSE 1
-                END AS has_price_range
-            FROM Products p
-            LEFT JOIN ProductLangs pl 
-                ON pl.p_id = p.p_id AND pl.lg_code = ?
-            LEFT JOIN ProductVariants pv 
-                ON pv.p_id = p.p_id
-            WHERE p.p_isActive = 1
-                AND p.st_id = ?
-            GROUP BY p.p_id, pl.p_name, pl.p_title
-            ORDER BY p.p_id DESC
-            `,
-            [lg_code, st_id]
-        )
-        conn.commit();
-        return rows
-    } catch (err) {
-        conn.rollback();
-        throw err;
-    } finally {
-        conn.release()
-    }
-}
+//     try {
+//         const [rows] = await conn.query<(RowDataPacket & ProductShopDTO)[]>(
+//             `
+//             SELECT
+//                 p.p_id,
+//                 pl.p_name,
+//                 pl.p_title,
+//                 (
+//                     SELECT ip.ip_image_url
+//                     FROM ImageProduct ip
+//                     WHERE ip.p_id = p.p_id
+//                     ORDER BY ip.ip_id ASC
+//                     LIMIT 1
+//                 ) AS ip_image_url,
+//                 MIN(pv.pv_price) AS min_price,
+//                 MAX(pv.pv_price) AS max_price,
+//                 MAX(COALESCE(pv.discount, 0)) AS discount,
+//                 CASE
+//                     WHEN MIN(pv.pv_price) = MAX(pv.pv_price) THEN 0
+//                     ELSE 1
+//                 END AS has_price_range
+//             FROM Products p
+//             LEFT JOIN ProductLangs pl
+//                 ON pl.p_id = p.p_id AND pl.lg_code = ?
+//             LEFT JOIN ProductVariants pv
+//                 ON pv.p_id = p.p_id
+//             WHERE p.p_isActive = 1
+//                 AND p.st_id = ?
+//             GROUP BY p.p_id, pl.p_name, pl.p_title
+//             ORDER BY p.p_id DESC
+//             `,
+//             [lg_code, st_id]
+//         )
+//         conn.commit();
+//         return rows
+//     } catch (err) {
+//         conn.rollback();
+//         throw err;
+//     } finally {
+//         conn.release()
+//     }
+// }
 
 
