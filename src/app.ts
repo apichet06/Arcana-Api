@@ -43,11 +43,14 @@ export function createApp() {
         credentials: true,
     };
 
-    app.use(cors(corsOptions));
+    app.use(cors());
     app.use(express.json({ limit: "10mb" }));
     app.use(express.urlencoded({ extended: true, limit: "10mb" }));
     app.use(requestLogger);
 
+    app.get('/', (req, res) => {
+        res.send('Hello Arcana!')
+    })
     app.use("/api", healthRoutes);
     app.use("/api/uploads",
         express.static(path.join(process.cwd(), "public/uploads"), {
