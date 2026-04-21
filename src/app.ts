@@ -29,9 +29,21 @@ import { productShopRouter } from "./modules/productshop/productshop.routes.js";
 
 export function createApp() {
     const app = express();
-
     app.use(helmet());
-    app.use(cors());
+
+    const corsOptions = {
+        origin: [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "https://arcanabackoffice.dev.system-samt.com",
+            "https://arcana-shop.dev.system-samt.com"
+        ],
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+        credentials: true,
+    };
+
+    app.use(cors(corsOptions));
     app.use(express.json({ limit: "10mb" }));
     app.use(express.urlencoded({ extended: true, limit: "10mb" }));
     app.use(requestLogger);
@@ -64,7 +76,6 @@ export function createApp() {
     app.use("/api/landingPage", landingPageRouter)
     app.use("/api/acceptProduct", acceptProductRouter)
     app.use("/api/productShop", productShopRouter)
-
 
     app.use(notFound);
     app.use(errorHandler);
