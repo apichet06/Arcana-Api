@@ -49,7 +49,7 @@ export function createApp() {
     app.use(requestLogger);
 
     app.get('/', (req, res) => {
-        res.send('Hello Arcana!')
+        res.status(200).send("Arcana API is running");
     })
     app.use("/api", healthRoutes);
     app.use("/api/uploads",
