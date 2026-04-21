@@ -43,14 +43,12 @@ export function createApp() {
         credentials: true,
     };
 
-    app.use(cors());
+    app.use(cors(corsOptions));
     app.use(express.json({ limit: "10mb" }));
     app.use(express.urlencoded({ extended: true, limit: "10mb" }));
     app.use(requestLogger);
 
-    app.get('/', (req, res) => {
-        res.status(200).send("Arcana API is running");
-    })
+
     app.use("/api", healthRoutes);
     app.use("/api/uploads",
         express.static(path.join(process.cwd(), "public/uploads"), {
@@ -79,6 +77,10 @@ export function createApp() {
     app.use("/api/landingPage", landingPageRouter)
     app.use("/api/acceptProduct", acceptProductRouter)
     app.use("/api/productShop", productShopRouter)
+
+    app.get('/', (req, res) => {
+        res.status(200).send("Arcana API is running");
+    })
 
     app.use(notFound);
     app.use(errorHandler);
