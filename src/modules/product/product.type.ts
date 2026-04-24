@@ -53,7 +53,6 @@ export type UpdateProductInput = {
     p_title: string;
     p_name: string;
     p_description: string;
-    st_id: number;
     p_isActive: boolean;
     p_isAccept: boolean;
     reason: string | null;

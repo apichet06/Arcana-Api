@@ -261,7 +261,6 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             p_update_at: new Date(),
-            st_id: input.st_id,
             p_isActive: toDbBool(input.p_isActive),
             p_isAccept: toDbBool(input.p_isAccept),
             reason: input.reason,

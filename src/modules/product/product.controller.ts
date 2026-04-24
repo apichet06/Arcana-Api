@@ -110,7 +110,7 @@ export const update = asyncHandler(async (req, res) => {
 
     const data = {
         p_title, p_name, p_description: transformedDescription, c_id, b_id,
-        ptag_id, ctl_id, ps_id, e_id: emp_id, st_id: storeId, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy
+        ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy
     };
 
 
