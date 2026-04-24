@@ -82,7 +82,7 @@ export const create = asyncHandler(async (req, res) => {
 });
 
 export const update = asyncHandler(async (req, res) => {
-    const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
+    const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_isAccept } = req.body;
     const pl_id = Number(req.params.pl_id);
     const emp_id = Number(req.empId);
     const storeId = Number(req.storeId);
@@ -103,7 +103,7 @@ export const update = asyncHandler(async (req, res) => {
 
     const imagesToDelete = getImagesToDelete(oldDescription, transformedDescription);
 
-    const p_isAccept = storeId !== 1 ? false : true;
+
     const reason = null
     const p_isAcceptDate = null
     const p_isAcceptBy = null
@@ -148,8 +148,7 @@ export const createOptionVariant = asyncHandler(async (req, res) => {
     data.p_isAcceptDate = null;
     data.p_isAcceptBy = null;
     data.reason = null;
-    data.p_isAccept = storeId !== 1 ? false : true;
-
+    data.p_isAccept
 
     const files = req.files as Express.Multer.File[] | undefined;
 

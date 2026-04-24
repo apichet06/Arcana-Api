@@ -248,6 +248,13 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
         // -----------------------------
         // 3) update Products
         // -----------------------------
+        const toDbBool = (value: unknown): 0 | 1 => {
+            const v = String(value).trim().toLowerCase();
+
+            return v === "true" || v === "1" || v === "yes" || v === "on"
+                ? 1
+                : 0;
+        };
         const masterDataProduct = {
             c_id: input.c_id,
             b_id: input.b_id,
@@ -255,14 +262,27 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             ps_id: input.ps_id,
             p_update_at: new Date(),
             st_id: input.st_id,
-            p_isActive: input.p_isActive,
-            p_isAccept: input.p_isAccept,
+            p_isActive: toDbBool(input.p_isActive),
+            p_isAccept: toDbBool(input.p_isAccept),
             reason: input.reason,
             p_isAcceptBy: input.p_isAcceptBy,
             p_isAcceptDate: input.p_isAcceptDate
         };
+        console.log("data => " + input.p_isAccept);
 
-        await conn.query<ResultSetHeader>("UPDATE Products SET ? WHERE p_id = ?", [masterDataProduct, p_id]);
+        const [result] = await conn.query<ResultSetHeader>("UPDATE Products SET ? WHERE p_id = ?", [masterDataProduct, p_id]);
+        console.log({
+            raw: input.p_isAccept,
+            type: typeof input.p_isAccept,
+            convert: toDbBool(input.p_isAccept)
+        });
+        console.log("update result =>", {
+            p_id,
+            inputAccept: input.p_isAccept,
+            saveAccept: masterDataProduct.p_isAccept,
+            affectedRows: result.affectedRows,
+            changedRows: result.changedRows,
+        });
 
         // -----------------------------
         // 4) ถ้ามีรูปใหม่ -> ลบรูปเก่า + insert รูปใหม่
