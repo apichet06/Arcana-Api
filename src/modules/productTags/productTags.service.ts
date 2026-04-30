@@ -6,12 +6,13 @@ import { CommonMessages } from "../../shared/messages/common.messages.js";
 import { translateProductText } from "../../shared/translate/translate.js";
 
 
-export async function listProductTags(): Promise<ProductTagsDTO[]> {
+export async function listProductTags(lg_code: string): Promise<ProductTagsDTO[]> {
     const [rows] = await pool.query<(RowDataPacket & ProductTagsDTO)[]>(`
         SELECT a.*,b.* ,c.e_status,a.e_create_at FROM ProductTags a
         INNER JOIN ProductTagLangs b on a.ptag_id = b.ptag_id
         INNER JOIN Employees c on a.e_id = c.e_id
-        ORDER BY b.ptt_id,b.lg_code desc`
+        WHERE b.lg_code = ?
+        ORDER BY b.ptt_id,b.lg_code desc`, [lg_code]
     );
     return rows;
 }

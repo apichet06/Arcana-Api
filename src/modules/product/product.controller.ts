@@ -12,12 +12,14 @@ import { deleteManyPhysicalFiles } from "../../shared/helper/deleteUploadFile.js
 const apiBaseUrl = process.env.API_BASE_URL ?? "";
 
 export const list = asyncHandler(async (_req, res) => {
-    const data = await products.getList();
+    const { lg_code } = _req.params;
+
+    const data = await products.getList(String(lg_code));
     res.status(200).json({ data });
 });
 
 export const create = asyncHandler(async (req, res) => {
-    const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
+    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
 
     const files = (req.files as Express.Multer.File[]) ?? [];
 
@@ -58,7 +60,6 @@ export const create = asyncHandler(async (req, res) => {
 
 
     const input = {
-        p_title,
         p_name,
         p_description: transformedDescription,
         c_id: Number(c_id),
@@ -82,10 +83,10 @@ export const create = asyncHandler(async (req, res) => {
 });
 
 export const update = asyncHandler(async (req, res) => {
-    const { p_title, p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_isAccept } = req.body;
+    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_isAccept } = req.body;
     const pl_id = Number(req.params.pl_id);
     const emp_id = Number(req.empId);
-    const storeId = Number(req.storeId);
+    // const storeId = Number(req.storeId);
 
     const files = (req.files as Express.Multer.File[]) ?? [];
 
@@ -109,7 +110,7 @@ export const update = asyncHandler(async (req, res) => {
     const p_isAcceptBy = null
 
     const data = {
-        p_title, p_name, p_description: transformedDescription, c_id, b_id,
+        p_name, p_description: transformedDescription, c_id, b_id,
         ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy
     };
 

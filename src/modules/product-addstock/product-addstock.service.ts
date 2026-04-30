@@ -6,27 +6,33 @@ import { ApiError } from "../../shared/errors/ApiError.js";
 export async function list(st_id: number, log_code: string): Promise<StockProductResponse[]> {
 
     const [rows] = await pool.query<(RowDataPacket[]) & StockProductResponse[]>(`
-        SELECT a.*,
-            (SELECT GROUP_CONCAT(g.poi_value ORDER BY f.poi_id SEPARATOR '/')
-                FROM VariantOptionItems f
-                JOIN ProductOptionItems g ON g.poi_id = f.poi_id
-                WHERE f.pv_id = a.pv_id
-            ) AS poi_values,
-            c.ul_name,
-            c.lg_code,
-            d.on_hand, 
-            d.reserved_qty,
-            d.loc_id,
-            g.name_in_thai as province,
-            d.inv_id
-        FROM ProductVariants a
-        INNER JOIN Units b ON a.unit_id = b.u_id
-        INNER JOIN UnitLangs c ON b.u_id = c.u_id
-        INNER JOIN Inventorys d ON a.pv_id = d.pv_id
-        INNER JOIN Locations f ON f.loc_id = d.loc_id
-        INNER JOIN Provinces g ON f.Provinces_id = g.id
-            WHERE c.lg_code = ? AND a.st_id = ?
-            ORDER BY a.pv_id DESC`, [log_code, st_id]);
+ 
+            SELECT  c.*,b.p_name,  
+                        b.lg_code,
+                        d.on_hand, 
+                        d.reserved_qty,
+                        d.loc_id,
+                        g.name_in_thai as province,
+                        d.inv_id ,
+                        (SELECT GROUP_CONCAT(g.poi_value ORDER BY f.poi_id SEPARATOR '/')
+                            FROM VariantOptionItems f
+                            JOIN ProductOptionItems g ON g.poi_id = f.poi_id
+                            WHERE f.pv_id = c.pv_id
+                        ) AS poi_values,
+                        j.ul_name 
+            FROM Products a 
+            INNER JOIN ProductLangs b 
+            ON a.p_id = b.p_id
+            INNER JOIN ProductVariants c 
+            ON c.p_id = a.p_id 
+            INNER JOIN Inventorys d ON c.pv_id = d.pv_id
+            INNER JOIN Locations f ON f.loc_id = d.loc_id
+            INNER JOIN Provinces g ON f.Provinces_id = g.id
+            INNER JOIN Units h ON h.u_id = c.unit_id
+            INNER JOIN UnitLangs j ON j.u_id = h.u_id
+            WHERE b.lg_code = ? and a.st_id = ? and j.lg_code = ?
+            order by a.p_id desc`, [log_code, st_id, log_code]);
+
     return rows;
 
 }

@@ -8,8 +8,8 @@ import { transformLexicalDescription } from "../../shared/utils/ฺBase64Image/t
 const apiBaseUrl = process.env.API_BASE_URL ?? "";
 
 export const List = asyncHandler(async (req, res) => {
-    const { st_id } = req.params;
-    const data = await landingpage.List(Number(st_id));
+    const { st_id, lg_code } = req.params;
+    const data = await landingpage.List(Number(st_id), String(lg_code));
     res.status(200).json({ data });
 })
 

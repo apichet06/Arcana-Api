@@ -114,7 +114,7 @@ export async function deleteCategory(c_id: number): Promise<void> {
         const [res] = await pool.query<ResultSetHeader>(
             "DELETE FROM Categorys WHERE c_id = ?", [c_id]
         );
-        if (res.affectedRows === 0 && resLang.affectedRows === 0) {
+        if (res.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);
         }
         return;

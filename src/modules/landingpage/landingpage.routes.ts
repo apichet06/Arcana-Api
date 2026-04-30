@@ -11,7 +11,7 @@ landingPageRouter.get("/slug", controller.GetLandingPagesluge);
 landingPageRouter.get("/slug/:slug", controller.GetUniqueSlug);
 landingPageRouter.get("/lp/:slug/:lg_code", controller.GetLandingPageProductId);
 landingPageRouter.use(Auth);
-landingPageRouter.get("/:st_id", controller.List);
+landingPageRouter.get("/:st_id/:lg_code", controller.List);
 
 landingPageRouter.post("/", upload.single("lp_imag_url"), controller.CreateLandingPage);
 landingPageRouter.put("/:lp_id", upload.single("lp_imag_url"), controller.UpdateLandingPage);

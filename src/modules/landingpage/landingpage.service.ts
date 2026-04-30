@@ -8,14 +8,14 @@ import type { PoolConnection } from "mysql2/promise";
 import { translateProductText } from "../../shared/translate/translate.js";
 
 
-export async function List(st_id: number,): Promise<LandingpageDTO[]> {
+export async function List(st_id: number, lg_code: string): Promise<LandingpageDTO[]> {
     const [res] = await pool.query<LandingpageDTO[] & RowDataPacket[]>(`SELECT a.*,c.p_name,b.p_code From LandingPages a
                   INNER JOIN Products b
                   ON a.p_id = b.p_id
                   INNER JOIN ProductLangs c 
                   ON c.p_id = b.p_id
-				  WHERE a.st_id = ? and c.lg_code = 'th' 
-                  ORDER BY a.lp_id DESC`, [st_id]);
+				  WHERE a.st_id = ? and a.lg_code = ? and c.lg_code = ?
+                  ORDER BY a.lp_id DESC`, [st_id, lg_code, lg_code]);
 
     return res;
 }

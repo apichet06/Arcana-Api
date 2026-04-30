@@ -35,7 +35,6 @@ export type CreateProductInput = {
     ctl_id: number;
     ps_id: number;
     images: string[];
-    p_title: string;
     p_name: string;
     p_description: string;
     p_isActive: boolean;
@@ -50,7 +49,6 @@ export type UpdateProductInput = {
     ptag_id: number[];
     ctl_id: number;
     ps_id: number;
-    p_title: string;
     p_name: string;
     p_description: string;
     p_isActive: boolean;

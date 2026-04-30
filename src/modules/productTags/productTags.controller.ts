@@ -4,7 +4,8 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js"
 import *  as  productTags from "./productTags.service.js"
 
 export const list = asyncHandler(async (_req, res) => {
-    const data = await productTags.listProductTags();
+    const { lg_code } = _req.params;
+    const data = await productTags.listProductTags(String(lg_code));
     res.status(200).json({ data });
 })
 

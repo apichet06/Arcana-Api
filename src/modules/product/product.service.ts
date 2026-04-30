@@ -34,9 +34,9 @@ export async function getOtherDescriptionsByProductId(p_id: number, currentPlId:
 }
 
 
-export async function getList(): Promise<ProductDTO[]> {
+export async function getList(lg_code: string): Promise<ProductDTO[]> {
     const [rows] = await pool.query<RowDataPacket[] & ProductDTO[]>(`
-        SELECT a.*,b.pl_id,c.ctl_description,f.e_firstname,b.lg_code,e.cl_name,h.b_name,g.ps_name,b.p_title,b.p_name,j.st_company_name,b.p_description,
+        SELECT a.*,b.pl_id,c.ctl_description,c.ctl_name,f.e_firstname,b.lg_code,e.cl_name,h.b_name,g.ps_name,b.p_title,b.p_name,j.st_company_name,b.p_description,
             COALESCE(( SELECT JSON_ARRAYAGG(JSON_OBJECT(
                         'ip_id', ip.ip_id,
                         'images', ip.ip_image_url
@@ -55,8 +55,13 @@ export async function getList(): Promise<ProductDTO[]> {
                     ON pt.ptag_id = ptl.ptag_id
                     AND ptl.lg_code = b.lg_code
                 WHERE pt.p_id = a.p_id
-            ), JSON_ARRAY()) AS ptag_id
-        
+            ), JSON_ARRAY()) AS ptag_id,
+            (
+                SELECT COUNT(*)
+                FROM ProductVariants pv
+                WHERE pv.p_id = a.p_id
+            ) AS variant_count
+
         FROM Products a
         INNER JOIN ProductLangs b
         ON a.p_id = b.p_id
@@ -76,9 +81,9 @@ export async function getList(): Promise<ProductDTO[]> {
         ON i.e_id = a.e_id
         INNER JOIN Store j
         ON j.st_id = i.st_id
-        ORDER BY a.p_id DESC`);
+        WHERE b.lg_code = ?
+        ORDER BY a.p_id DESC`, [lg_code]);
     return rows;
-
 
 }
 
@@ -128,9 +133,9 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
+        // console.log(input.p_name);
 
         const shortFields = await translateProductFields([
-            input.p_title,
             input.p_name,
         ]);
 
@@ -143,13 +148,6 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
             ja: shortFields.ja[0] ?? "",
         };
 
-        const p_title = {
-            th: shortFields.th[1] ?? "",
-            en: shortFields.en[1] ?? "",
-            ja: shortFields.ja[1] ?? "",
-        };
-
-
         const masterData = {
             e_id: input.e_id,
             p_code: p_code,
@@ -160,7 +158,6 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             st_id: input.st_id,
-
 
         }
         const [masterRes] = await conn.query<ResultSetHeader>(
@@ -187,12 +184,12 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
 
         const p_id = masterRes.insertId;
         const langRows = [
-            [p_id, "th", p_name.th, p_title.th, p_description.th],
-            [p_id, "en", p_name.en, p_title.en, p_description.en],
-            [p_id, "ja", p_name.ja, p_title.ja, p_description.ja],
+            [p_id, "th", p_name.th, p_description.th],
+            [p_id, "en", p_name.en, p_description.en],
+            [p_id, "ja", p_name.ja, p_description.ja],
         ];
 
-        await conn.query(`INSERT INTO ProductLangs (p_id, lg_code, p_title, p_name, p_description) VALUES ?`, [langRows]);
+        await conn.query(`INSERT INTO ProductLangs (p_id, lg_code,p_name, p_description) VALUES ?`, [langRows]);
         await conn.commit();
         return p_id;
     } catch (err) {
@@ -239,7 +236,6 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
         // -----------------------------
         const masterDataProductlang = {
             p_name: input.p_name,
-            p_title: input.p_title,
             p_description: input.p_description,
         };
 
@@ -267,21 +263,21 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             p_isAcceptBy: input.p_isAcceptBy,
             p_isAcceptDate: input.p_isAcceptDate
         };
-        console.log("data => " + input.p_isAccept);
+
 
         const [result] = await conn.query<ResultSetHeader>("UPDATE Products SET ? WHERE p_id = ?", [masterDataProduct, p_id]);
-        console.log({
-            raw: input.p_isAccept,
-            type: typeof input.p_isAccept,
-            convert: toDbBool(input.p_isAccept)
-        });
-        console.log("update result =>", {
-            p_id,
-            inputAccept: input.p_isAccept,
-            saveAccept: masterDataProduct.p_isAccept,
-            affectedRows: result.affectedRows,
-            changedRows: result.changedRows,
-        });
+        // console.log({
+        //     raw: input.p_isAccept,
+        //     type: typeof input.p_isAccept,
+        //     convert: toDbBool(input.p_isAccept)
+        // });
+        // console.log("update result =>", {
+        //     p_id,
+        //     inputAccept: input.p_isAccept,
+        //     saveAccept: masterDataProduct.p_isAccept,
+        //     affectedRows: result.affectedRows,
+        //     changedRows: result.changedRows,
+        // });
 
         // -----------------------------
         // 4) ถ้ามีรูปใหม่ -> ลบรูปเก่า + insert รูปใหม่
@@ -776,9 +772,14 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
                     [item.on_hand, item.reserved_qty, found.inv_id]
                 );
             } else {
-                await conn.query(
+                const [result] = await conn.query<ResultSetHeader>(
                     `INSERT INTO Inventorys (pv_id, loc_id, on_hand, reserved_qty) VALUES (?, ?, ?, ?)`,
                     [item.pv_id, item.loc_id, item.on_hand, item.reserved_qty]
+                );
+                const newInvId = result.insertId;
+                await conn.query(
+                    `INSERT INTO InventoryLog(on_hand,ivnl_status,inv_id,pv_id,st_id,e_id) VALUES (?,?,?,?,?,?)`,
+                    [item.on_hand, 'เพิ่ม', newInvId, item.pv_id, st_id, e_id]
                 );
             }
         }
@@ -788,6 +789,7 @@ export async function createOptionVariant(data: SubmitPayload): Promise<void> {
             p_isAcceptBy: data.p_isAcceptBy,
             reason: data.reason,
             p_isAccept: data.p_isAccept,
+            p_update_at: new Date(),
         }
 
 
