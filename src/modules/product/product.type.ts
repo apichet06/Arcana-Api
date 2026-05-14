@@ -39,6 +39,7 @@ export type CreateProductInput = {
     p_description: string;
     p_isActive: boolean;
     p_isAccept: boolean;
+    p_preorder_delivery_days: number | null;
     st_id: number;
 }
 
@@ -56,6 +57,7 @@ export type UpdateProductInput = {
     reason: string | null;
     p_isAcceptDate: string | null;
     p_isAcceptBy: number | null;
+    p_preorder_delivery_days: number | null;
 }
 
 export type ImageProductRow = {

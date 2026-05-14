@@ -13,6 +13,7 @@ export async function list(st_id: number, log_code: string): Promise<StockProduc
                         d.reserved_qty,
                         d.loc_id,
                         g.name_in_thai as province,
+                        f.loc_name,
                         d.inv_id ,
                         (SELECT GROUP_CONCAT(g.poi_value ORDER BY f.poi_id SEPARATOR '/')
                             FROM VariantOptionItems f
@@ -30,8 +31,9 @@ export async function list(st_id: number, log_code: string): Promise<StockProduc
             INNER JOIN Provinces g ON f.Provinces_id = g.id
             INNER JOIN Units h ON h.u_id = c.unit_id
             INNER JOIN UnitLangs j ON j.u_id = h.u_id
-            WHERE b.lg_code = ? and a.st_id = ? and j.lg_code = ?
-            order by a.p_id desc`, [log_code, st_id, log_code]);
+            WHERE b.lg_code = ? and a.st_id = ? and j.lg_code = ? and f.st_id = ?
+            order by a.p_id desc`, [log_code, st_id, log_code, st_id]);
+
 
     return rows;
 

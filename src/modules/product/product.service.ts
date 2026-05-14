@@ -158,7 +158,7 @@ export async function createProduct(input: CreateProductInput): Promise<number> 
             ctl_id: input.ctl_id,
             ps_id: input.ps_id,
             st_id: input.st_id,
-
+            p_preorder_delivery_days: input.p_preorder_delivery_days,
         }
         const [masterRes] = await conn.query<ResultSetHeader>(
             "INSERT INTO Products SET ?", masterData
@@ -261,7 +261,8 @@ export async function UpdateProducts(pl_id: number, input: UpdateProductInput, f
             p_isAccept: toDbBool(input.p_isAccept),
             reason: input.reason,
             p_isAcceptBy: input.p_isAcceptBy,
-            p_isAcceptDate: input.p_isAcceptDate
+            p_isAcceptDate: input.p_isAcceptDate,
+            p_preorder_delivery_days: input.p_preorder_delivery_days
         };
 
 
@@ -379,6 +380,7 @@ export async function getOptionVariant(p_id: number): Promise<OptionVariantDetai
             INNER JOIN ProductVariants pv ON pv.pv_id = voi.pv_id WHERE pv.p_id = ?
             ORDER BY voi.pv_id ASC, voi.poi_id ASC`, [p_id]
         );
+        console.log(p_id);
 
         const [inventory] = await conn.query<RowDataPacket[]>(
             `SELECT

@@ -1,5 +1,8 @@
+import http from "http";
 import { env } from "./config/env.js";
 import { createApp } from "./app.js";
+import { initSocket } from "./socket/socket.js";
+
 
 process.on("unhandledRejection", (err) => {
     console.error("UNHANDLED REJECTION:", err);
@@ -11,7 +14,10 @@ process.on("uncaughtException", (err) => {
 
 const app = createApp();
 
-app.listen(env.PORT, () => {
-    // eslint-disable-next-line no-console
+const httpServer = http.createServer(app);
+
+initSocket(httpServer);
+
+httpServer.listen(env.PORT, () => {
     console.log(`API running on http://localhost:${env.PORT}`);
 });

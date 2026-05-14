@@ -26,6 +26,8 @@ import { productStockRouter } from "./modules/product-addstock/product-addstock.
 import { landingPageRouter } from "./modules/landingpage/landingpage.routes.js";
 import { acceptProductRouter } from "./modules/accept-product/accept-product.routes.js";
 import { productShopRouter } from "./modules/productshop/productshop.routes.js";
+import { NotiRouter } from "./modules/notifications/notification.routes.js";
+
 
 export function createApp() {
     const app = express();
@@ -77,6 +79,7 @@ export function createApp() {
     app.use("/api/landingPage", landingPageRouter)
     app.use("/api/acceptProduct", acceptProductRouter)
     app.use("/api/productShop", productShopRouter)
+    app.use("/api/notifications", NotiRouter)
 
     app.get('/', (req, res) => {
         res.status(200).send("Arcana API is running");

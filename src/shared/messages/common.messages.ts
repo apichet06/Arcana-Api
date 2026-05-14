@@ -7,7 +7,7 @@ export const CommonMessages = {
     notFound: "ไม่พบข้อมูล",
     used: "ข้อมูลนี้ถูกใช้อยู่ ไม่สามารถลบได้",
 
-    isExits: "ข้อมูลนี้มีอยู่แล้ว",
+    isExits: "ข้อมูลนี้ถูกใช้งานแล้ว",
     error: "Error",
     error500: "Server Error!",
 } as const;

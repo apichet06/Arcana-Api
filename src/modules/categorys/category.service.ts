@@ -74,17 +74,18 @@ export async function createCategory(input: CreateCategoryInput): Promise<number
         // 3) Insert translations (CategoryLangs) 3 แถว
         // แนะนำทำ UNIQUE (c_id, lg_code) ใน DB กันซ้ำ
         const langRows = [
-            [c_id, "th", t.th, input.ctl_id],
-            [c_id, "en", t.en, input.ctl_id],
-            [c_id, "ja", t.ja, input.ctl_id],
+            [c_id, "th", t.th],
+            [c_id, "en", t.en],
+            [c_id, "ja", t.ja],
         ];
 
-        await conn.query(`INSERT INTO CategoryLangs (c_id, lg_code, cl_name,ctl_id) VALUES ? `, [langRows]);
+        await conn.query(`INSERT INTO CategoryLangs (c_id,lg_code, cl_name ) VALUES ? `, [langRows]);
         await conn.commit();
         return c_id;
     } catch (err: any) {
+
         await conn.rollback();
-        if (isDupError(err)) throw new ApiError(409, CommonMessages.isExits);
+        if (isDupError(err)) throw new ApiError(409, CommonMessages.error);
         throw err;
     } finally {
         conn.release();
@@ -95,7 +96,7 @@ export async function updateCategory(cl_id: number, input: Partial<UpdateCategor
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
-        await conn.query("UPDATE CategoryLangs SET cl_name = ?,ctl_id = ? WHERE cl_id = ?", [input.cl_name, input.ctl_id, cl_id]);
+        await conn.query("UPDATE CategoryLangs SET cl_name = ? WHERE cl_id = ?", [input.cl_name, cl_id]);
         await conn.commit();
     } catch (err) {
         await conn.rollback();
@@ -107,21 +108,32 @@ export async function updateCategory(cl_id: number, input: Partial<UpdateCategor
 }
 
 export async function deleteCategory(c_id: number): Promise<void> {
+    const conn = await pool.getConnection();
     try {
-        const [resLang] = await pool.query<ResultSetHeader>(
-            "DELETE FROM CategoryLangs WHERE c_id = ?", [c_id]
+        await conn.beginTransaction();
+
+        // ตรวจสอบก่อนว่า category ถูกใช้งานใน Product อยู่หรือไม่
+        const [usedRows] = await conn.query<RowDataPacket[]>(
+            "SELECT COUNT(*) as count FROM Products WHERE c_id = ?", [c_id]
         );
-        const [res] = await pool.query<ResultSetHeader>(
-            "DELETE FROM Categorys WHERE c_id = ?", [c_id]
-        );
+        if ((usedRows[0] as any).count > 0) {
+            throw new ApiError(409, CommonMessages.used);
+        }
+
+        await conn.query<ResultSetHeader>("DELETE FROM CategoryLangs WHERE c_id = ?", [c_id]);
+        const [res] = await conn.query<ResultSetHeader>("DELETE FROM Categorys WHERE c_id = ?", [c_id]);
         if (res.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);
         }
-        return;
+        await conn.commit();
+
     } catch (err: any) {
+        await conn.rollback();
         if (isFkConstraintError(err)) {
             throw new ApiError(409, CommonMessages.used);
         }
         throw err;
+    } finally {
+        conn.release();
     }
 }

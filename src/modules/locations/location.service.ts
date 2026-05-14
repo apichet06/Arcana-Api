@@ -31,14 +31,28 @@ export async function CreateLocation(input: CreateLocationInput): Promise<number
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
+
         if (input.is_default) {
             await conn.query("UPDATE Locations SET is_default = 0 WHERE st_id = ?", [input.st_id]);
         }
+
+        let loc_name: string;
+        if (input.is_default) {
+            loc_name = "คลังหลัก";
+        } else {
+            const [countRows] = await conn.query<RowDataPacket[]>(
+                "SELECT COUNT(*) as count FROM Locations WHERE st_id = ? AND is_default = 0",
+                [input.st_id]
+            );
+            const count = (countRows[0] as any).count as number;
+            loc_name = `คลังย่อย ${count + 1}`;
+        }
+
         const [result] = await conn.query<ResultSetHeader>(
             "INSERT INTO Locations SET ?",
-            [input]
+            [{ ...input, loc_name }]
         );
-        conn.commit();
+        await conn.commit();
         return result.insertId;
 
     } catch (err) {
@@ -56,12 +70,39 @@ export async function UpdateLocation(loc_id: number, input: Partial<UpdateLocati
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
+
+        const updateData: any = { ...input };
+
         if (input.is_default) {
-            await conn.query("UPDATE Locations SET is_default = 0 WHERE st_id = ?", [input.st_id])
+            // หา old default ก่อน reset
+            const [oldDefaultRows] = await conn.query<RowDataPacket[]>(
+                "SELECT loc_id FROM Locations WHERE st_id = ? AND is_default = 1 AND loc_id != ?",
+                [input.st_id, loc_id]
+            );
+
+            // นับจำนวนคลังย่อยที่มีอยู่ (ไม่นับตัวที่กำลัง promote)
+            const [countRows] = await conn.query<RowDataPacket[]>(
+                "SELECT COUNT(*) as count FROM Locations WHERE st_id = ? AND is_default = 0 AND loc_id != ?",
+                [input.st_id, loc_id]
+            );
+            const count = (countRows[0] as any).count as number;
+
+            await conn.query("UPDATE Locations SET is_default = 0 WHERE st_id = ?", [input.st_id]);
+
+            // rename old default → คลังย่อย N
+            if (oldDefaultRows.length > 0) {
+                await conn.query(
+                    "UPDATE Locations SET loc_name = ? WHERE loc_id = ?",
+                    [`คลังย่อย ${count + 1}`, oldDefaultRows[0]!.loc_id]
+                );
+            }
+
+            updateData.loc_name = "คลังหลัก";
         }
+
         const [result] = await conn.query<ResultSetHeader>(
             "UPDATE Locations SET ? WHERE loc_id = ?",
-            [input, loc_id]
+            [updateData, loc_id]
         );
         if (result.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);
@@ -76,7 +117,6 @@ export async function UpdateLocation(loc_id: number, input: Partial<UpdateLocati
     } finally {
         conn.release();
     }
-
 }
 
 type LocationRow = RowDataPacket & {

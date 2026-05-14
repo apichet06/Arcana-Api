@@ -19,7 +19,7 @@ export const list = asyncHandler(async (_req, res) => {
 });
 
 export const create = asyncHandler(async (req, res) => {
-    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive } = req.body;
+    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_preorder_delivery_days } = req.body;
 
     const files = (req.files as Express.Multer.File[]) ?? [];
 
@@ -69,6 +69,7 @@ export const create = asyncHandler(async (req, res) => {
         ps_id: Number(ps_id),
         p_isActive: p_isActive ?? true,
         p_isAccept: storeId !== 1 ? false : true,
+        p_preorder_delivery_days: Number(p_preorder_delivery_days) || 0,
         images,
         e_id: empId,
         st_id: storeId,
@@ -83,7 +84,7 @@ export const create = asyncHandler(async (req, res) => {
 });
 
 export const update = asyncHandler(async (req, res) => {
-    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_isAccept } = req.body;
+    const { p_name, p_description, c_id, b_id, ptag_id, ctl_id, ps_id, p_isActive, p_isAccept, p_preorder_delivery_days } = req.body;
     const pl_id = Number(req.params.pl_id);
     const emp_id = Number(req.empId);
     // const storeId = Number(req.storeId);
@@ -111,7 +112,7 @@ export const update = asyncHandler(async (req, res) => {
 
     const data = {
         p_name, p_description: transformedDescription, c_id, b_id,
-        ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy
+        ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy, p_preorder_delivery_days: Number(p_preorder_delivery_days) || 0
     };
 
 

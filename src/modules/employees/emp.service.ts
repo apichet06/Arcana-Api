@@ -33,6 +33,14 @@ export async function findByEmpLogin(e_email: string): Promise<empDTO | null> {
     return rows[0] || null;
 }
 
+export async function findByEmpId(e_id: number): Promise<empDTO | null> {
+    const [rows] = await pool.query<(empDTO & RowDataPacket)[]>(
+        `SELECT * FROM Employees WHERE  e_id = ?`, [e_id]);
+    return rows[0] || null;
+}
+
+
+
 export async function listEmps(st_id: number): Promise<empDTO[]> {
     const [rows] = await pool.query<(RowDataPacket[]) & empDTO[]>(`SELECT * FROM Employees WHERE st_id = ? order by e_id asc`, [st_id]);
     return rows;
@@ -109,7 +117,6 @@ export async function createEmp(inputStore: CreateStoreInput, inputEmp: CreateEm
             account_number: inputStore.account_number,
             omise_recipient_id: inputStore.omise_recipient_id,
             st_email: inputStore.st_email,
-            st_isAccept: inputStore.st_isAccept,
             created_at: inputStore.created_at,
             st_phone: inputStore.st_phone,
             st_image: inputStore.st_image,
@@ -120,7 +127,6 @@ export async function createEmp(inputStore: CreateStoreInput, inputEmp: CreateEm
         const st_id = resStore.insertId;
         const emp = {
             e_usercode,
-            e_title: inputEmp.e_title,
             e_firstname: inputEmp.e_firstname,
             e_lastname: inputEmp.e_lastname,
             e_password: inputEmp.e_password,

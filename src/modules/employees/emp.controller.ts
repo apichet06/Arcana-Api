@@ -38,7 +38,7 @@ export const login = asyncHandler(async (req, res) => {
         empStatus: employee.e_status,
         empFirstname: employee.e_firstname,
         storeId: employee.st_id,
-        empFullname: `${employee.e_title}${employee.e_firstname} ${employee.e_lastname}`,
+        empFullname: `${employee.e_firstname} ${employee.e_lastname}`,
     }, jwtSecret, { expiresIn: '20h' })
 
     const { e_password, e_phone, e_upd_name, e_add_name, e_add_datetime, ...data } = employee;
@@ -47,10 +47,10 @@ export const login = asyncHandler(async (req, res) => {
 
 
 export const createFullAdmin = asyncHandler(async (req, res) => {
-    const { e_title, e_firstname, e_lastname, e_email, e_phone, e_isActive, e_add_name, e_status, st_id } = req.body;
+    const { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_add_name, e_status, st_id } = req.body;
     const password = "arcana@!234";
     const hashePassword = await bcrypt.hash(password, 10);
-    const employee = { e_title, e_firstname, e_lastname, e_password: hashePassword, e_email, e_phone, e_isActive, e_add_name, e_status, st_id };
+    const employee = { e_firstname, e_lastname, e_password: hashePassword, e_email, e_phone, e_isActive, e_add_name, e_status, st_id };
     await emp.CreateEmpAdmins(employee);
     res.status(201).json({ message: CommonMessages.insertSuccess });
 
@@ -58,8 +58,8 @@ export const createFullAdmin = asyncHandler(async (req, res) => {
 
 export const updatefullAdmin = asyncHandler(async (req, res) => {
     const { e_id } = req.params;
-    const { e_title, e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id } = req.body;
-    const employee = { e_title, e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id };
+    const { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id } = req.body;
+    const employee = { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id };
     await emp.UpdateEmpAdmins(Number(e_id), employee);
     res.status(200).json({ message: CommonMessages.updateSuccess });
 
@@ -73,25 +73,17 @@ export const deleteFullAdmin = asyncHandler(async (req, res) => {
 
 
 export const create = asyncHandler(async (req, res) => {
-    const { e_title, e_firstname, e_lastname, e_password, e_email, e_phone, e_isActive, e_add_name, e_isAccept, e_status, st_id } = req.body;
-    const { st_company_name, _company_name, st_idcard, bank_name, account_number, omise_recipient_id, st_email, st_isAccept, created_at, st_phone } = req.body;
+    const { e_firstname, e_lastname, e_password, e_email, e_phone, e_isActive, e_add_name, e_isAccept, e_status, st_id } = req.body;
+    const { st_company_name, _company_name, st_idcard, bank_name, account_number, omise_recipient_id, st_email, created_at, st_phone } = req.body;
     const { loc_name, loc_address, loc_postcode, Subdistricts_id, Districts_id, Provinces_id } = req.body;
     const empId = Number(req.empId);
     const files = req.files as { [key: string]: Express.Multer.File[] };
     // let e_image = null;
     let st_image = null;
 
-    // employee image
-    // if (files?.e_image) {
-    //     const file = files.e_image[0];
-    //     const path = await fileUploadImage(file, `profile_${Date.now()}`, 'employee');
-    //     if (path) {
-    //         e_image = path.replace(/\\/g, '/');
-    //     }
-    // }
 
     // store image
-    if (files?.st_image) {
+    if (files?.st_image?.[0]) {
         const file = files.st_image[0];
         const path = await fileUploadImage(file, `store_${Date.now()}`, 'store');
         if (path) {
@@ -99,8 +91,8 @@ export const create = asyncHandler(async (req, res) => {
         }
     }
 
-    const employee = { e_title, e_firstname, e_lastname, e_password, e_email, e_phone, e_isActive, e_add_name, e_isAccept, e_status, st_id };
-    const store = { st_company_name, _company_name, st_idcard, bank_name, account_number, omise_recipient_id, st_email, st_isAccept, created_at, st_phone, st_image, e_id: empId };
+    const employee = { e_firstname, e_lastname, e_password, e_email, e_phone, e_isActive, e_add_name, e_isAccept, e_status, st_id };
+    const store = { st_company_name, _company_name, st_idcard, bank_name, account_number, omise_recipient_id, st_email, created_at, st_phone, st_image, e_id: empId };
     const location = { loc_name, loc_address, loc_postcode, Subdistricts_id, Districts_id, Provinces_id };
 
 

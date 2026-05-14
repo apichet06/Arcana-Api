@@ -1,7 +1,6 @@
 
 export type empDTO = {
     e_id: number;
-    e_title: string;
     e_firstname: string;
     e_lastname: string;
     e_password: string;
@@ -20,7 +19,6 @@ export type empDTO = {
 }
 
 export type CreateEmpInput = {
-    e_title: string;
     e_firstname: string;
     e_lastname: string;
     e_password: string;
@@ -39,7 +37,6 @@ export type CreateStoreInput = {
     account_number: string;
     omise_recipient_id: string;
     st_email: string;
-    st_isAccept: string;
     created_at: string;
     st_phone: string;
     st_image: string | null;
@@ -58,7 +55,6 @@ export type CreateLocationInput = {
 
 
 export type UpdateEmpInput = {
-    e_title: string;
     e_firstname: string;
     e_lastname: string;
     e_email: string;

@@ -158,8 +158,6 @@ export async function UpdateLandingPage(input: LandingpageUpdateInput): Promise<
 
     } catch (err) {
         await conn.rollback();
-        console.log(err);
-
         if (isDupError(err)) throw new ApiError(409, CommonMessages.isExits);
         throw err;
     } finally {
