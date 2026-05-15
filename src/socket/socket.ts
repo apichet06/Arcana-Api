@@ -17,8 +17,7 @@ export function initSocket(httpServer: HttpServer) {
             methods: ["GET", "POST"],
             credentials: true,
         },
-        transports: ["polling", "websocket"],
-        allowUpgrades: true,
+        transports: ["polling"],
         pingTimeout: 60000,
         pingInterval: 25000,
     });
