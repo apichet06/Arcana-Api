@@ -5,7 +5,9 @@ let io: Server | null = null;
 
 const allowedOrigins = [
     "http://localhost:3000",
+    "https://localhost:3000",
     "http://localhost:3001",
+    "https://localhost:3001",
     "https://arcanabackoffice.dev.system-samt.com",
     "https://arcana-shop.dev.system-samt.com",
 ];
@@ -33,6 +35,11 @@ export function initSocket(httpServer: HttpServer) {
         socket.on("join_store", (storeId: number) => {
             socket.join(`STORE_${storeId}`);
             console.log(`STORE_${storeId} joined`);
+        });
+
+        socket.on("join_conversation", ({ conv_id }: { conv_id: number }) => {
+            socket.join(`CONV_${conv_id}`);
+            console.log(`CONV_${conv_id} joined`);
         });
 
         socket.on("disconnect", () => {

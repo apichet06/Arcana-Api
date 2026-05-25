@@ -594,3 +594,4 @@ export async function listBanks(): Promise<BankDTO[]> {
     const [rows] = await pool.query<(RowDataPacket[]) & BankDTO[]>(`SELECT bk_id, bk_name FROM Bank order by bk_id asc`);
     return rows;
 }
+

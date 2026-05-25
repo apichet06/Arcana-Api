@@ -400,3 +400,4 @@ export const listBanks = asyncHandler(async (_req, res) => {
     const data = await store.listBanks();
     res.status(200).json({ data });
 });
+

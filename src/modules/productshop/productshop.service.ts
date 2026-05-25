@@ -2,13 +2,32 @@ import type { RowDataPacket } from "mysql2";
 import { pool } from "../../db/pool.js";
 import type { InventoryByVariantDTO, InventoryStoreDTO, LandignPageNamgeDTO, ProductImageDTO, ProductOptionGroupDTO, ProductShopByIdResponse, ProductShopDetailDTO, ProductShopDTO, ProductTagDTO, ProductVariantDTO } from "./productshop.type.js";
 
-type GetProductShopParams = {
+export type GetProductShopParams = {
     lg_code: string
     keyword?: string
     sort?: string
     page?: number
     category?: string
     limit?: number
+    ctl_id?: number  // filter ตาม catalog (arcana=1, deadstock=2)
+    random?: boolean
+}
+
+/**
+ * Fisher-Yates shuffle — สลับตำแหน่ง array แบบ random
+ * ทำงาน O(n) ไม่ใช้ ORDER BY RAND() ที่ช้าใน SQL
+ */
+function shuffleArray<T>(arr: T[]): T[] {
+    const copy = [...arr]
+    for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        // ใช้ temp variable + as T เพราะ TypeScript ถือว่า index access คืน T | undefined
+        // แต่เรารู้ว่า i และ j อยู่ใน bounds แน่นอน จึง cast ได้ปลอดภัย
+        const temp = copy[i] as T
+        copy[i] = copy[j] as T
+        copy[j] = temp
+    }
+    return copy
 }
 
 function normalizeSort(sort?: string) {
@@ -43,13 +62,14 @@ export async function getProductShop({
     page = 1,
     category = "",
     limit = 12,
+    ctl_id,
+    random = false,
 }: GetProductShopParams): Promise<ProductShopResponse> {
     const conn = await pool.getConnection()
 
     try {
         const safePage = Number.isFinite(page) && page > 0 ? page : 1
         const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 12
-        const offset = (safePage - 1) * safeLimit
         const safeSort = normalizeSort(sort)
         const trimmedKeyword = keyword.trim()
         const safeCategory = category.trim()
@@ -109,7 +129,12 @@ export async function getProductShop({
             queryParams.push(Number(safeCategory))
         }
 
-        // ถ้าคุณอยากโชว์เฉพาะสินค้าที่ active ให้เปิดบรรทัดนี้
+        // filter ตาม catalog (arcana / deadstock) ที่ฝั่ง DB เลย ไม่ต้อง filter ซ้ำ client
+        if (ctl_id) {
+            whereConditions.push(`a.ctl_id = ?`)
+            queryParams.push(ctl_id)
+        }
+
         whereConditions.push(`a.p_isActive = 1`)
         whereConditions.push(`a.p_isAccept = 1`)
 
@@ -151,6 +176,8 @@ export async function getProductShop({
 
         const total = countRows[0]?.total ?? 0
         const totalPages = Math.max(1, Math.ceil(total / safeLimit))
+        const currentPage = Math.min(safePage, totalPages)
+        const offset = (currentPage - 1) * safeLimit
 
         const listSql = `
             SELECT 
@@ -176,14 +203,12 @@ export async function getProductShop({
             FROM Products a
             INNER JOIN ProductLangs b 
                 ON a.p_id = b.p_id
-            LEFT JOIN ImageProduct c 
-                ON c.ip_id = (
-                    SELECT ip_id
-                    FROM ImageProduct
-                    WHERE p_id = a.p_id
-                    ORDER BY ip_id ASC
-                    LIMIT 1
-                )
+            LEFT JOIN (
+                SELECT p_id, MIN(ip_id) AS ip_id
+                FROM ImageProduct
+                GROUP BY p_id
+            ) first_img ON first_img.p_id = a.p_id
+            LEFT JOIN ImageProduct c ON c.ip_id = first_img.ip_id
             INNER JOIN ProductVariants d 
                 ON d.p_id = a.p_id
             INNER JOIN Catalog e 
@@ -220,7 +245,7 @@ export async function getProductShop({
                 items: [],
                 pagination: {
                     total,
-                    page: safePage,
+                    page: currentPage,
                     limit: safeLimit,
                     totalPages,
                 },
@@ -257,7 +282,7 @@ export async function getProductShop({
             })
         }
 
-        const items: ProductShopDTO[] = rows.map((row) => ({
+        const mappedItems: ProductShopDTO[] = rows.map((row) => ({
             ...row,
             min_price: Number(row.min_price ?? 0),
             max_price: Number(row.max_price ?? 0),
@@ -266,11 +291,19 @@ export async function getProductShop({
             tags: tagMap.get(row.p_id) ?? [],
         }))
 
+        // shuffle เฉพาะ tag-based sort ที่ขอ random เช่นหน้าแรก
+        // หน้ารวมสินค้าต้องเรียงนิ่งเพื่อให้ pagination ไม่ซ้ำ/ไม่ขาดตอน
+        // sort ตามราคา (price-low/price-high) ไม่ shuffle เพราะ ordering มีความหมาย
+        const TAG_SORTS = ["new", "popular", "featured"] as const
+        const items = random && TAG_SORTS.includes(safeSort as typeof TAG_SORTS[number])
+            ? shuffleArray(mappedItems)
+            : mappedItems
+
         return {
             items,
             pagination: {
                 total,
-                page: safePage,
+                page: currentPage,
                 limit: safeLimit,
                 totalPages,
             },

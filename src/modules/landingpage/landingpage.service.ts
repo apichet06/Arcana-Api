@@ -201,7 +201,7 @@ export async function GetLandingPageProductId(
             `SELECT a.*,c.p_name, 
             MIN(d.pv_price) AS min_price,
             MAX(d.pv_price) AS max_price,
-            MAX(COALESCE(d.discount, 0)) AS discount
+            MAX(COALESCE(d.discount, 0)) AS discount,b.c_id
             From LandingPages a 
             INNER JOIN Products b 
             ON a.p_id = b.p_id

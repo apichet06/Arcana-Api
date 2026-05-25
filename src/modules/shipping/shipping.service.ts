@@ -1,0 +1,418 @@
+import { pool } from "../../db/pool.js";
+import { ApiError } from "../../shared/errors/ApiError.js";
+import type {
+  ShippingCarrier,
+  ShippingRate,
+  PostcodeZoneRule,
+  CreateCarrierInput,
+  UpdateCarrierInput,
+  CreateRateInput,
+  UpdateRateInput,
+  CreateZoneRuleInput,
+  UpdateZoneRuleInput,
+  CalculateInput,
+  CalculateResult,
+} from "./shipping.type.js";
+
+// ─── Carriers ────────────────────────────────────────────────────────────────
+
+export async function listCarriers(): Promise<ShippingCarrier[]> {
+  const [rows] = await pool.query(
+    "SELECT * FROM Shipping_carriers ORDER BY sc_id"
+  );
+  return rows as ShippingCarrier[];
+}
+
+export async function createCarrier(input: CreateCarrierInput): Promise<number> {
+  const { sc_code, sc_name, calc_type, vol_divisor = null, is_active = 1 } = input;
+
+  if (calc_type === "CHARGEABLE_WEIGHT" && !vol_divisor) {
+    throw new ApiError(400, "จำเป็นต้องระบุ vol_divisor สำหรับการคิดน้ำหนักเชิงปริมาตร");
+  }
+
+  const [dup] = await pool.query(
+    "SELECT sc_id FROM Shipping_carriers WHERE sc_code = ?",
+    [sc_code.toUpperCase()]
+  );
+  if ((dup as unknown[]).length > 0) {
+    throw new ApiError(409, `รหัสขนส่ง "${sc_code}" มีอยู่แล้วในระบบ`);
+  }
+
+  const [result] = await pool.query(
+    "INSERT INTO Shipping_carriers (sc_code, sc_name, calc_type, vol_divisor, is_active) VALUES (?, ?, ?, ?, ?)",
+    [
+      sc_code.toUpperCase(),
+      sc_name,
+      calc_type,
+      calc_type === "WEIGHT_ONLY" ? null : vol_divisor,
+      is_active,
+    ]
+  );
+  return (result as { insertId: number }).insertId;
+}
+
+export async function updateCarrier(scId: number, input: UpdateCarrierInput): Promise<void> {
+  const carrier = await findCarrierById(scId);
+  if (!carrier) throw new ApiError(404, "ไม่พบข้อมูลขนส่ง");
+
+  if (input.sc_code !== undefined) {
+    const [dup] = await pool.query(
+      "SELECT sc_id FROM Shipping_carriers WHERE sc_code = ? AND sc_id != ?",
+      [input.sc_code.toUpperCase(), scId]
+    );
+    if ((dup as unknown[]).length > 0) {
+      throw new ApiError(409, `รหัสขนส่ง "${input.sc_code}" มีอยู่แล้วในระบบ`);
+    }
+  }
+
+  const newCalcType = input.calc_type ?? carrier.calc_type;
+  const newVolDivisor = input.vol_divisor ?? carrier.vol_divisor;
+  if (newCalcType === "CHARGEABLE_WEIGHT" && !newVolDivisor) {
+    throw new ApiError(400, "จำเป็นต้องระบุ vol_divisor สำหรับการคิดน้ำหนักเชิงปริมาตร");
+  }
+
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (input.sc_code !== undefined) { fields.push("sc_code = ?"); values.push(input.sc_code.toUpperCase()); }
+  if (input.sc_name !== undefined) { fields.push("sc_name = ?"); values.push(input.sc_name); }
+  if (input.calc_type !== undefined) { fields.push("calc_type = ?"); values.push(input.calc_type); }
+  if (input.vol_divisor !== undefined) { fields.push("vol_divisor = ?"); values.push(input.vol_divisor); }
+  if (input.is_active !== undefined) { fields.push("is_active = ?"); values.push(input.is_active); }
+
+  if (fields.length === 0) return;
+  values.push(scId);
+
+  await pool.query(
+    `UPDATE Shipping_carriers SET ${fields.join(", ")} WHERE sc_id = ?`,
+    values
+  );
+}
+
+export async function toggleCarrierActive(scId: number): Promise<void> {
+  const [result] = await pool.query(
+    "UPDATE Shipping_carriers SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE sc_id = ?",
+    [scId]
+  );
+  if ((result as { affectedRows: number }).affectedRows === 0) {
+    throw new ApiError(404, "ไม่พบข้อมูลขนส่ง");
+  }
+}
+
+export async function deleteCarrier(scId: number): Promise<void> {
+  const [rates] = await pool.query(
+    "SELECT COUNT(*) as cnt FROM Shipping_rates WHERE sc_id = ?",
+    [scId]
+  );
+  const rateCount = (rates as { cnt: number }[])[0]?.cnt ?? 0;
+  if (rateCount > 0) {
+    throw new ApiError(409, "ไม่สามารถลบได้ เนื่องจากยังมีอัตราค่าส่งอยู่ กรุณาลบอัตราค่าส่งทั้งหมดก่อน");
+  }
+
+  const [zones] = await pool.query(
+    "SELECT COUNT(*) as cnt FROM Postcode_zone_rules WHERE sc_id = ?",
+    [scId]
+  );
+  const zoneCount = (zones as { cnt: number }[])[0]?.cnt ?? 0;
+  if (zoneCount > 0) {
+    throw new ApiError(409, "ไม่สามารถลบได้ เนื่องจากยังมีกฎโซนอยู่ กรุณาลบกฎโซนทั้งหมดก่อน");
+  }
+
+  const [result] = await pool.query(
+    "DELETE FROM Shipping_carriers WHERE sc_id = ?",
+    [scId]
+  );
+  if ((result as { affectedRows: number }).affectedRows === 0) {
+    throw new ApiError(404, "ไม่พบข้อมูลขนส่ง");
+  }
+}
+
+async function findCarrierById(scId: number): Promise<ShippingCarrier | null> {
+  const [rows] = await pool.query(
+    "SELECT * FROM Shipping_carriers WHERE sc_id = ?",
+    [scId]
+  );
+  return (rows as ShippingCarrier[])[0] ?? null;
+}
+
+// ─── Rates ────────────────────────────────────────────────────────────────────
+
+export async function listRates(scId: number): Promise<ShippingRate[]> {
+  const [rows] = await pool.query(
+    "SELECT * FROM Shipping_rates WHERE sc_id = ? ORDER BY zone_code, weight_from",
+    [scId]
+  );
+  return rows as ShippingRate[];
+}
+
+export async function createRate(input: CreateRateInput): Promise<number> {
+  const { sc_id, zone_code, weight_from, weight_to, sr_price } = input;
+
+  validateWeightRange(weight_from, weight_to);
+  await assertNoRateOverlap(sc_id, zone_code, weight_from, weight_to);
+
+  const [result] = await pool.query(
+    "INSERT INTO Shipping_rates (sc_id, zone_code, weight_from, weight_to, sr_price) VALUES (?, ?, ?, ?, ?)",
+    [sc_id, zone_code.toUpperCase(), weight_from, weight_to, sr_price]
+  );
+  return (result as { insertId: number }).insertId;
+}
+
+export async function updateRate(srId: number, input: UpdateRateInput): Promise<void> {
+  const [existing] = await pool.query(
+    "SELECT * FROM Shipping_rates WHERE sr_id = ?",
+    [srId]
+  );
+  const current = (existing as ShippingRate[])[0];
+  if (!current) throw new ApiError(404, "ไม่พบข้อมูลอัตราค่าส่ง");
+
+  if (
+    input.weight_from !== undefined ||
+    input.weight_to !== undefined ||
+    input.zone_code !== undefined
+  ) {
+    const newFrom = input.weight_from ?? current.weight_from;
+    const newTo = input.weight_to ?? current.weight_to;
+    const newZone = input.zone_code ?? current.zone_code;
+    validateWeightRange(newFrom, newTo);
+    await assertNoRateOverlap(current.sc_id, newZone, newFrom, newTo, srId);
+  }
+
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (input.zone_code !== undefined) { fields.push("zone_code = ?"); values.push(input.zone_code.toUpperCase()); }
+  if (input.weight_from !== undefined) { fields.push("weight_from = ?"); values.push(input.weight_from); }
+  if (input.weight_to !== undefined) { fields.push("weight_to = ?"); values.push(input.weight_to); }
+  if (input.sr_price !== undefined) { fields.push("sr_price = ?"); values.push(input.sr_price); }
+
+  if (fields.length === 0) return;
+  values.push(srId);
+
+  await pool.query(
+    `UPDATE Shipping_rates SET ${fields.join(", ")} WHERE sr_id = ?`,
+    values
+  );
+}
+
+export async function deleteRate(srId: number): Promise<void> {
+  const [result] = await pool.query(
+    "DELETE FROM Shipping_rates WHERE sr_id = ?",
+    [srId]
+  );
+  if ((result as { affectedRows: number }).affectedRows === 0) {
+    throw new ApiError(404, "ไม่พบข้อมูลอัตราค่าส่ง");
+  }
+}
+
+function validateWeightRange(from: number, to: number): void {
+  if (from < 0) throw new ApiError(400, "น้ำหนักตั้งต้นต้องไม่ติดลบ");
+  if (to <= from) throw new ApiError(400, "น้ำหนักสิ้นสุดต้องมากกว่าน้ำหนักตั้งต้น");
+}
+
+async function assertNoRateOverlap(scId: number, zoneCode: string, from: number, to: number, excludeId?: number
+): Promise<void> {
+  const params: unknown[] = [scId, zoneCode.toUpperCase(), to, from];
+  const excludeClause = excludeId ? " AND sr_id != ?" : "";
+  if (excludeId) params.push(excludeId);
+
+  const [rows] = await pool.query(
+    `SELECT sr_id, weight_from, weight_to FROM Shipping_rates
+     WHERE sc_id = ? AND zone_code = ? AND weight_from <= ? AND weight_to >= ?${excludeClause}`,
+    params
+  );
+  const conflicts = rows as { sr_id: number; weight_from: number; weight_to: number }[];
+  const conflict = conflicts[0];
+  if (conflict) {
+    throw new ApiError(
+      409,
+      `มีช่วงน้ำหนักนี้อยู่แล้ว กรุณาเลือกช่วงน้ำหนักใหม่`
+    );
+  }
+}
+
+// ─── Zone Rules ───────────────────────────────────────────────────────────────
+
+export async function listZoneRules(scId: number): Promise<PostcodeZoneRule[]> {
+  const [rows] = await pool.query(
+    "SELECT * FROM Postcode_zone_rules WHERE sc_id = ? ORDER BY zone_code, postcode_from",
+    [scId]
+  );
+  return rows as PostcodeZoneRule[];
+}
+
+export async function createZoneRule(input: CreateZoneRuleInput): Promise<number> {
+  const { sc_id, zone_code, postcode_from, postcode_to, priority, is_active = 1 } = input;
+
+  validatePostcodeRange(postcode_from, postcode_to);
+  await assertNoZoneOverlap(sc_id, zone_code, postcode_from, postcode_to);
+
+  const [result] = await pool.query(
+    "INSERT INTO Postcode_zone_rules (sc_id, zone_code, postcode_from, postcode_to, priority, is_active) VALUES (?, ?, ?, ?, ?, ?)",
+    [sc_id, zone_code.toUpperCase(), postcode_from, postcode_to, priority, is_active]
+  );
+  return (result as { insertId: number }).insertId;
+}
+
+export async function updateZoneRule(pzrId: number, input: UpdateZoneRuleInput): Promise<void> {
+  const [existing] = await pool.query(
+    "SELECT * FROM Postcode_zone_rules WHERE pzr_id = ?",
+    [pzrId]
+  );
+  const current = (existing as PostcodeZoneRule[])[0];
+  if (!current) throw new ApiError(404, "ไม่พบข้อมูลกฎโซน");
+
+  if (
+    input.postcode_from !== undefined ||
+    input.postcode_to !== undefined ||
+    input.zone_code !== undefined
+  ) {
+    const newFrom = input.postcode_from ?? current.postcode_from;
+    const newTo = input.postcode_to ?? current.postcode_to;
+    const newZone = input.zone_code ?? current.zone_code;
+    validatePostcodeRange(newFrom, newTo);
+    await assertNoZoneOverlap(current.sc_id, newZone, newFrom, newTo, pzrId);
+  }
+
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (input.zone_code !== undefined) { fields.push("zone_code = ?"); values.push(input.zone_code.toUpperCase()); }
+  if (input.postcode_from !== undefined) { fields.push("postcode_from = ?"); values.push(input.postcode_from); }
+  if (input.postcode_to !== undefined) { fields.push("postcode_to = ?"); values.push(input.postcode_to); }
+  if (input.priority !== undefined) { fields.push("priority = ?"); values.push(input.priority); }
+  if (input.is_active !== undefined) { fields.push("is_active = ?"); values.push(input.is_active); }
+
+  if (fields.length === 0) return;
+  values.push(pzrId);
+
+  await pool.query(
+    `UPDATE Postcode_zone_rules SET ${fields.join(", ")} WHERE pzr_id = ?`,
+    values
+  );
+}
+
+export async function deleteZoneRule(pzrId: number): Promise<void> {
+  const [existing] = await pool.query(
+    "SELECT sc_id, zone_code FROM Postcode_zone_rules WHERE pzr_id = ?",
+    [pzrId]
+  );
+  const current = (existing as Pick<PostcodeZoneRule, "sc_id" | "zone_code">[])[0];
+  if (!current) throw new ApiError(404, "ไม่พบข้อมูลกฎโซน");
+
+  const [rates] = await pool.query(
+    "SELECT COUNT(*) as cnt FROM Shipping_rates WHERE sc_id = ? AND zone_code = ?",
+    [current.sc_id, current.zone_code]
+  );
+  const rateCount = (rates as { cnt: number }[])[0]?.cnt ?? 0;
+  if (rateCount > 0) {
+    throw new ApiError(409, "โซนนี้มีอัตราค่าส่งใช้งานอยู่ กรุณาลบอัตราค่าส่งของโซนนี้ก่อน");
+  }
+
+  const [result] = await pool.query(
+    "DELETE FROM Postcode_zone_rules WHERE pzr_id = ?",
+    [pzrId]
+  );
+  if ((result as { affectedRows: number }).affectedRows === 0) {
+    throw new ApiError(404, "ไม่พบข้อมูลกฎโซน");
+  }
+}
+
+function validatePostcodeRange(from: number, to: number): void {
+  if (from < 10000 || from > 96999) throw new ApiError(400, "รหัสไปรษณีย์ตั้งต้นไม่ถูกต้อง (10000–96999)");
+  if (to < 10000 || to > 96999) throw new ApiError(400, "รหัสไปรษณีย์สิ้นสุดไม่ถูกต้อง (10000–96999)");
+  if (to < from) throw new ApiError(400, "รหัสไปรษณีย์สิ้นสุดต้องไม่น้อยกว่าตั้งต้น");
+}
+
+async function assertNoZoneOverlap(
+  scId: number,
+  zoneCode: string,
+  from: number,
+  to: number,
+  excludeId?: number
+): Promise<void> {
+  const params: unknown[] = [scId, zoneCode.toUpperCase(), to, from];
+  const excludeClause = excludeId ? " AND pzr_id != ?" : "";
+  if (excludeId) params.push(excludeId);
+
+  const [rows] = await pool.query(
+    `SELECT pzr_id FROM Postcode_zone_rules
+     WHERE sc_id = ? AND zone_code = ? AND postcode_from <= ? AND postcode_to >= ?${excludeClause}`,
+    params
+  );
+  if ((rows as unknown[]).length > 0) {
+    throw new ApiError(
+      409,
+      "พื้นที่นี้ถูกตั้งค่าไว้แล้ว กรุณาเลือกพื้นที่อื่น"
+    );
+  }
+}
+
+// ─── Calculator ───────────────────────────────────────────────────────────────
+
+export async function calculateShipping(input: CalculateInput): Promise<CalculateResult[]> {
+  const postcode = Number(input.postcode);
+  const weightG = Number(input.weight_g);
+
+  if (isNaN(postcode) || postcode < 10000 || postcode > 96999) {
+    throw new ApiError(400, "รหัสไปรษณีย์ไม่ถูกต้อง");
+  }
+  if (isNaN(weightG) || weightG <= 0) {
+    throw new ApiError(400, "น้ำหนักต้องมากกว่า 0");
+  }
+
+  const [carriers] = await pool.query(
+    "SELECT * FROM Shipping_carriers WHERE is_active = 1 ORDER BY sc_id"
+  );
+
+  const results: CalculateResult[] = [];
+
+  for (const carrier of carriers as ShippingCarrier[]) {
+    let billedWeight = weightG;
+
+    const volumeCm3 =
+      input.volume_cm3 ??
+      (input.length_cm && input.width_cm && input.height_cm
+        ? input.length_cm * input.width_cm * input.height_cm
+        : null);
+
+    if (
+      carrier.calc_type === "CHARGEABLE_WEIGHT" &&
+      carrier.vol_divisor &&
+      volumeCm3
+    ) {
+      const volWeightG = (volumeCm3 / carrier.vol_divisor) * 1000;
+      billedWeight = Math.max(weightG, volWeightG);
+    }
+    billedWeight = Math.ceil(billedWeight);
+
+    const [zoneRows] = await pool.query(
+      `SELECT zone_code FROM Postcode_zone_rules
+       WHERE sc_id = ? AND COALESCE(is_active, 1) = 1 AND postcode_from <= ? AND postcode_to >= ?
+       ORDER BY priority ASC LIMIT 1`,
+      [carrier.sc_id, postcode, postcode]
+    );
+    const zoneCode = (zoneRows as { zone_code: string }[])[0]?.zone_code ?? "ALL";
+
+    const [rateRows] = await pool.query(
+      `SELECT sr_price FROM Shipping_rates
+       WHERE sc_id = ? AND zone_code = ? AND weight_from <= ? AND weight_to >= ?
+       LIMIT 1`,
+      [carrier.sc_id, zoneCode, billedWeight, billedWeight]
+    );
+    const price = (rateRows as { sr_price: number }[])[0]?.sr_price ?? null;
+
+    results.push({
+      sc_id: carrier.sc_id,
+      sc_code: carrier.sc_code,
+      sc_name: carrier.sc_name,
+      calc_type: carrier.calc_type,
+      billed_weight_g: Math.round(billedWeight),
+      zone_code: zoneCode,
+      price,
+      is_active: carrier.is_active,
+    });
+  }
+
+  return results;
+}

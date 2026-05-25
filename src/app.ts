@@ -27,6 +27,13 @@ import { landingPageRouter } from "./modules/landingpage/landingpage.routes.js";
 import { acceptProductRouter } from "./modules/accept-product/accept-product.routes.js";
 import { productShopRouter } from "./modules/productshop/productshop.routes.js";
 import { NotiRouter } from "./modules/notifications/notification.routes.js";
+import { registerBuyerRouter } from "./modules/register-buyer/register-buyer.routes.js";
+import { cartRouter } from "./modules/carts/carts.routes.js";
+import { orderRouter } from "./modules/orders/orders.routes.js";
+import { chatRouter } from "./modules/chat/chat.routes.js"
+import { reviewRouter } from "./modules/reviews/reviews.routes.js";
+import { couponRouter } from "./modules/coupons/coupon.routes.js";
+import { shippingRouter } from "./modules/shipping/shipping.routes.js";
 
 
 export function createApp() {
@@ -36,7 +43,9 @@ export function createApp() {
     const corsOptions = {
         origin: [
             "http://localhost:3000",
+            "https://localhost:3000",
             "http://localhost:3001",
+            "https://localhost:3001",
             "https://arcanabackoffice.dev.system-samt.com",
             "https://arcana-shop.dev.system-samt.com"
         ],
@@ -80,8 +89,15 @@ export function createApp() {
     app.use("/api/acceptProduct", acceptProductRouter)
     app.use("/api/productShop", productShopRouter)
     app.use("/api/notifications", NotiRouter)
+    app.use("/api/auth", registerBuyerRouter)
+    app.use("/api/cart", cartRouter)
+    app.use("/api/orders", orderRouter)
+    app.use("/api/chat", chatRouter)
+    app.use("/api/reviews", reviewRouter)
+    app.use("/api/coupons", couponRouter)
+    app.use("/api/shipping", shippingRouter)
 
-    app.get('/', (req, res) => {
+    app.get('/', (_req, res) => {
         res.status(200).send("Arcana API is running");
     })
 

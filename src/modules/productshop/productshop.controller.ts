@@ -9,16 +9,24 @@ export const listProductShop = asyncHandler(async (req, res) => {
     const category = String(req.query.category ?? "").trim()
     const page = Number(req.query.page ?? 1)
     const limit = Number(req.query.limit ?? 12)
+    const ctl_id = req.query.ctl_id ? Number(req.query.ctl_id) : undefined
+    const random = req.query.random === "1" || req.query.random === "true"
 
-
-    const data = await productShopService.getProductShop({
+    const productShopParams: productShopService.GetProductShopParams = {
         lg_code: lg_code as string,
         keyword,
         sort,
         page,
         category,
         limit,
-    });
+        random,
+    }
+
+    if (ctl_id !== undefined) {
+        productShopParams.ctl_id = ctl_id
+    }
+
+    const data = await productShopService.getProductShop(productShopParams);
     res.status(200).json({ data });
 });
 
