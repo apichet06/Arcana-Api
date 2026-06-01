@@ -34,6 +34,8 @@ import { chatRouter } from "./modules/chat/chat.routes.js"
 import { reviewRouter } from "./modules/reviews/reviews.routes.js";
 import { couponRouter } from "./modules/coupons/coupon.routes.js";
 import { shippingRouter } from "./modules/shipping/shipping.routes.js";
+import { paymentRouter } from "./modules/payments/payment.routes.js";
+import { statusRouters } from "./modules/statuses/statuses.routes.js";
 
 
 export function createApp() {
@@ -96,6 +98,8 @@ export function createApp() {
     app.use("/api/reviews", reviewRouter)
     app.use("/api/coupons", couponRouter)
     app.use("/api/shipping", shippingRouter)
+    app.use("/api/payments", paymentRouter)
+    app.use("/api/statuses", statusRouters)
 
     app.get('/', (_req, res) => {
         res.status(200).send("Arcana API is running");

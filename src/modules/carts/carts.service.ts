@@ -21,7 +21,7 @@ export async function addCartItem(input: AddCartItemInput): Promise<CartItemDTO>
         const effectivePrice = unitPrice - discountAmount;
 
         const [cartRows] = await conn.query<(RowDataPacket & { cart_id: number })[]>(
-            "SELECT cart_id FROM Carts WHERE u_id = ? AND status = 'active' LIMIT 1",
+            "SELECT cart_id FROM Carts WHERE u_id = ? AND status = 'active' ORDER BY cart_id DESC LIMIT 1",
             [input.u_id]
         );
 
@@ -63,6 +63,7 @@ export async function addCartItem(input: AddCartItemInput): Promise<CartItemDTO>
                     unit_price: unitPrice,
                     discount_amount: discountAmount,
                     line_total: lineTotal,
+                    is_selected: 0,
                     created_at: new Date(),
                     updated_at: new Date(),
                 }]
@@ -87,11 +88,11 @@ export async function addCartItem(input: AddCartItemInput): Promise<CartItemDTO>
     }
 }
 
-export async function getCart(u_id: number): Promise<CartDTO> {
+export async function getCart(u_id: number, lg_code = "th"): Promise<CartDTO> {
     const conn = await pool.getConnection();
     try {
         const [cartRows] = await conn.query<(RowDataPacket & { cart_id: number; status: string })[]>(
-            "SELECT cart_id, status FROM Carts WHERE u_id = ? AND status = 'active' LIMIT 1",
+            "SELECT cart_id, status FROM Carts WHERE u_id = ? AND status = 'active' ORDER BY cart_id DESC LIMIT 1",
             [u_id]
         );
 
@@ -119,11 +120,14 @@ export async function getCart(u_id: number): Promise<CartDTO> {
                     SEPARATOR ' | '
                 ) AS variant_label,
                 p.p_id,
+                p.st_id,
+                s.st_company_name,
                 pl.p_name
             FROM Cart_items ci
             INNER JOIN ProductVariants pv ON pv.pv_id = ci.pv_id
             INNER JOIN Products p ON p.p_id = pv.p_id
-            LEFT JOIN ProductLangs pl ON pl.p_id = p.p_id AND pl.lg_code = 'th'
+            INNER JOIN Store s ON s.st_id = p.st_id
+            LEFT JOIN ProductLangs pl ON pl.p_id = p.p_id AND pl.lg_code = ?
             LEFT JOIN ImageProduct ip ON ip.ip_id = (
                 SELECT ip_id FROM ImageProduct WHERE p_id = p.p_id ORDER BY ip_id ASC LIMIT 1
             )
@@ -134,10 +138,10 @@ export async function getCart(u_id: number): Promise<CartDTO> {
             WHERE ci.cart_id = ?
             GROUP BY
                 ci.ci_id, ci.cart_id, ci.pv_id, ci.qty,
-                ci.unit_price, ci.discount_amount, ci.line_total,
-                pv.pv_sku, pv.image_url, ip.ip_image_url, p.p_id, pl.p_name
+                ci.unit_price, ci.discount_amount, ci.line_total, ci.is_selected,
+                pv.pv_sku, pv.image_url, ip.ip_image_url, p.p_id, p.st_id, s.st_company_name, pl.p_name
             ORDER BY ci.ci_id ASC`,
-            [cartId]
+            [lg_code, cartId]
         );
 
         const totalAmount = itemRows.reduce((sum, r) => sum + Number(r.line_total), 0);

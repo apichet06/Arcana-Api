@@ -6,6 +6,7 @@ export interface ShippingCarrier {
   sc_name: string;
   calc_type: CalcType;
   vol_divisor: number | null;
+  tracking_url_template: string | null;
   is_active: number;
 }
 
@@ -33,6 +34,7 @@ export interface CreateCarrierInput {
   sc_name: string;
   calc_type: CalcType;
   vol_divisor?: number | null;
+  tracking_url_template?: string | null;
   is_active?: number;
 }
 
@@ -66,6 +68,7 @@ export interface CalculateInput {
   length_cm?: number;
   width_cm?: number;
   height_cm?: number;
+  origin_postcode?: string;
 }
 
 export interface CalculateResult {
@@ -77,4 +80,5 @@ export interface CalculateResult {
   zone_code: string;
   price: number | null;
   is_active: number;
+  source?: "shippop" | "manual";
 }

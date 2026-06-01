@@ -116,7 +116,11 @@ async function getCouponByCodeForUpdate(conn: PoolConnection, coCode: string): P
 }
 
 // ดึงเฉพาะสินค้าใน active cart ที่ลูกค้าเลือกไว้ เพื่อใช้เป็นฐานคำนวณคูปอง
-async function getActiveCartRows(conn: PoolConnection, uId: number): Promise<CartCouponRow[]> {
+async function getActiveCartRows(conn: PoolConnection, uId: number, stId?: number): Promise<CartCouponRow[]> {
+    const params: number[] = [uId];
+    const storeSql = stId ? "AND p.st_id = ?" : "";
+    if (stId) params.push(stId);
+
     const [rows] = await conn.query<CartCouponRow[]>(
         `
         SELECT
@@ -128,9 +132,18 @@ async function getActiveCartRows(conn: PoolConnection, uId: number): Promise<Car
         INNER JOIN Products p ON p.p_id = pv.p_id
         WHERE c.u_id = ?
           AND c.status = 'active'
-          AND COALESCE(ci.is_selected, 1) = 1
+          AND c.cart_id = (
+              SELECT active_cart.cart_id
+              FROM Carts active_cart
+              WHERE active_cart.u_id = ?
+                AND active_cart.status = 'active'
+              ORDER BY active_cart.cart_id DESC
+              LIMIT 1
+          )
+          AND ci.is_selected = 1
+          ${storeSql}
         `,
-        [uId]
+        [uId, ...params]
     );
 
     return rows;
@@ -148,6 +161,9 @@ async function validateCouponWithConnection(
 
     if (!coupon) throw new ApiError(404, "ไม่พบคูปอง");
     if (coupon.active !== 1) throw new ApiError(400, "คูปองนี้ถูกปิดใช้งาน");
+    if (input.st_id && coupon.st_id !== input.st_id) {
+        throw new ApiError(400, "คูปองนี้ใช้ได้เฉพาะร้านที่ออกคูปองเท่านั้น");
+    }
 
     const now = new Date();
     if (now < new Date(coupon.co_datetime_start)) throw new ApiError(400, "คูปองยังไม่ถึงเวลาใช้งาน");
@@ -182,7 +198,7 @@ async function validateCouponWithConnection(
         throw new ApiError(400, "คุณใช้คูปองนี้ครบจำนวนแล้ว");
     }
 
-    const cartRows = await getActiveCartRows(conn, input.u_id);
+    const cartRows = await getActiveCartRows(conn, input.u_id, input.st_id);
     if (cartRows.length === 0) throw new ApiError(400, "ไม่มีสินค้าในตะกร้าที่เลือกไว้");
 
     // ถ้าไม่ได้ผูกสินค้าไว้ แปลว่าคูปองใช้ได้กับทุกสินค้าในตะกร้า

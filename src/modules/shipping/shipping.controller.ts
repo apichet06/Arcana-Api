@@ -51,6 +51,8 @@ export const createCarrier = asyncHandler(async (req, res) => {
       calcType === "CHARGEABLE_WEIGHT" && body.vol_divisor != null
         ? parsePositiveNumber(body.vol_divisor, "vol_divisor")
         : null,
+    tracking_url_template:
+      body.tracking_url_template !== undefined ? String(body.tracking_url_template).trim() || null : null,
     is_active: body.is_active !== undefined ? Number(body.is_active) : 1,
   });
 
@@ -67,9 +69,12 @@ export const updateCarrier = asyncHandler(async (req, res) => {
     ...(body.calc_type !== undefined ? { calc_type: parseCalcType(body.calc_type) } : {}),
     ...(body.vol_divisor !== undefined
       ? {
-          vol_divisor:
-            body.vol_divisor === null ? null : parsePositiveNumber(body.vol_divisor, "vol_divisor"),
-        }
+        vol_divisor:
+          body.vol_divisor === null ? null : parsePositiveNumber(body.vol_divisor, "vol_divisor"),
+      }
+      : {}),
+    ...(body.tracking_url_template !== undefined
+      ? { tracking_url_template: String(body.tracking_url_template).trim() || null }
       : {}),
     ...(body.is_active !== undefined ? { is_active: Number(body.is_active) } : {}),
   });
@@ -207,6 +212,7 @@ export const calculateShipping = asyncHandler(async (req, res) => {
   const input = {
     postcode: String(body.postcode).trim(),
     weight_g: parsePositiveNumber(body.weight_g, "weight_g"),
+    ...(body.origin_postcode ? { origin_postcode: String(body.origin_postcode).trim() } : {}),
     ...(body.volume_cm3 != null ? { volume_cm3: Number(body.volume_cm3) } : {}),
     ...(body.length_cm != null ? { length_cm: Number(body.length_cm) } : {}),
     ...(body.width_cm != null ? { width_cm: Number(body.width_cm) } : {}),

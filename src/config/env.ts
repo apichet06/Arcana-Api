@@ -15,4 +15,7 @@ export const env = {
     DB_PASSWORD: must("DB_PASSWORD"),
     DB_NAME: must("DB_NAME"),
     DB_PORT: Number(process.env.DB_PORT ?? 3306),
+
+    // ใช้เฉพาะฝั่ง API เท่านั้น ห้ามส่ง secret key ไป browser
+    OMISE_SECRET_KEY: process.env.OMISE_SECRET_KEY,
 };

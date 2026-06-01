@@ -17,6 +17,16 @@ export async function ListNotification(st_id: number): Promise<NotificationDTO[]
     // })) as NotificationDTO[]
 }
 
+export async function ListBuyerNotification(userId: number): Promise<NotificationDTO[]> {
+    const [res] = await pool.query<RowDataPacket[] & NotificationDTO[]>(
+        `SELECT * FROM Notifications
+         WHERE target_type = 'USER' AND target_id = ?
+         ORDER BY noti_id DESC`,
+        [userId]
+    );
+    return res;
+}
+
 export async function getEmpBySTId(st_id: number): Promise<number[]> {
     const [res] = await pool.query<RowDataPacket[]>(`SELECT e_id FROM Employees WHERE st_id = ?`, [st_id])
     return res.map((row) => row.e_id)
@@ -30,10 +40,27 @@ export async function UpdateAsRead(noti_id: number): Promise<void> {
     if (res.affectedRows === 0) throw new ApiError(404, CommonMessages.notFound);
 }
 
+export async function UpdateBuyerAsRead(noti_id: number, userId: number): Promise<void> {
+    const [res] = await pool.query<ResultSetHeader>(
+        `UPDATE Notifications SET is_read = 1, read_at = ?
+         WHERE noti_id = ? AND target_type = 'USER' AND target_id = ?`,
+        [new Date(), noti_id, userId]
+    );
+    if (res.affectedRows === 0) throw new ApiError(404, CommonMessages.notFound);
+}
+
 export async function UpdateAllRead(st_id: number): Promise<void> {
     await pool.query<ResultSetHeader>(
         `UPDATE Notifications SET is_read = 1, read_at = ? WHERE target_id = ? AND is_read = 0`,
         [new Date(), st_id]
+    );
+}
+
+export async function UpdateBuyerAllRead(userId: number): Promise<void> {
+    await pool.query<ResultSetHeader>(
+        `UPDATE Notifications SET is_read = 1, read_at = ?
+         WHERE target_type = 'USER' AND target_id = ? AND is_read = 0`,
+        [new Date(), userId]
     );
 }
 

@@ -84,6 +84,7 @@ export type UpdateCouponInput = Partial<Omit<CreateCouponInput, "st_id">> & {
 export type ValidateCouponInput = {
     u_id: number;
     co_code: string;
+    st_id?: number;
 };
 
 export type ValidateCouponResult = {

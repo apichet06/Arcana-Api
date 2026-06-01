@@ -42,6 +42,12 @@ export type AuthResult = {
     isNew: boolean;
 };
 
+export type RefreshTokenSessionInput = {
+    u_id: number;
+    user_agent?: string | null;
+    ip_address?: string | null;
+};
+
 export type ProfileDTO = {
     u_id: number;
     u_username: string;

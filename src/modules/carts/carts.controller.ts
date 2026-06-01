@@ -2,11 +2,16 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
 import * as service from "./carts.service.js";
 
+function getRequestLanguage(value: unknown): string {
+    return typeof value === "string" && ["th", "en", "ja"].includes(value) ? value : "th";
+}
+
 export const getCart = asyncHandler(async (req, res) => {
     const u_id = req.userId;
+    const lg_code = getRequestLanguage(req.query.lg_code);
     if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
 
-    const cart = await service.getCart(u_id);
+    const cart = await service.getCart(u_id, lg_code);
     res.status(200).json({ data: cart });
 });
 
@@ -58,5 +63,4 @@ export const DeleteItem = asyncHandler(async (req, res) => {
     await service.deleteCartItem(ci_id, u_id);
     res.status(200).json({ message: "ลบสินค้าออกจากตะกร้าแล้ว" });
 });
-
 

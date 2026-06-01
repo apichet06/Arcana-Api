@@ -36,11 +36,14 @@ export type CartItemDetailDTO = {
     unit_price: number;
     discount_amount: number;
     line_total: number;
+    is_selected: 0 | 1;
     pv_sku: string | null;
     variant_label: string | null;
     image_url: string | null;
     p_id: number;
     p_name: string | null;
+    st_id: number;
+    st_company_name: string | null;
 };
 
 export type CartDTO = {

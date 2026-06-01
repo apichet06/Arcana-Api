@@ -1,9 +1,52 @@
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool } from "../../db/pool.js";
 import { ApiError, isDupError } from "../../shared/errors/ApiError.js";
 import { UserMessages } from "../../shared/messages/user.messages.js";
-import type { AddAddressInput, AddressDTO, AuthResult, FacebookUserInfo, GoogleUserInfo, ProfileDTO, RegisterBuyerInput, RegisterBuyerDTO } from "./type.js";
+import type { AddAddressInput, AddressDTO, AuthResult, FacebookUserInfo, GoogleUserInfo, ProfileDTO, RefreshTokenSessionInput, RegisterBuyerInput, RegisterBuyerDTO } from "./type.js";
+
+const REFRESH_TOKEN_DAYS = 30;
+let refreshTokenTableReady: Promise<void> | null = null;
+
+function hashRefreshToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function buildRefreshToken(): string {
+    return crypto.randomBytes(48).toString("base64url");
+}
+
+function getRefreshExpiresAt(): Date {
+    return new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000);
+}
+
+async function ensureRefreshTokenTable(): Promise<void> {
+    refreshTokenTableReady ??= pool.query(`
+        CREATE TABLE IF NOT EXISTS User_refresh_tokens (
+            urt_id BIGINT NOT NULL AUTO_INCREMENT,
+            u_id INT NOT NULL,
+            token_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            revoked_at DATETIME NULL,
+            replaced_by_hash CHAR(64) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME NULL,
+            user_agent VARCHAR(255) NULL,
+            ip_address VARCHAR(64) NULL,
+            PRIMARY KEY (urt_id),
+            UNIQUE KEY uq_user_refresh_token_hash (token_hash),
+            KEY idx_user_refresh_tokens_user (u_id, revoked_at, expires_at)
+        )
+    `).then(() => undefined);
+
+    return refreshTokenTableReady;
+}
+
+export const refreshTokenConfig = {
+    cookieName: "arcana_refresh_token",
+    maxAgeMs: REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000,
+};
 
 export async function registerBuyer(input: RegisterBuyerInput): Promise<RegisterBuyerDTO> {
     const conn = await pool.getConnection();
@@ -129,6 +172,116 @@ export async function loginBuyer(email: string, password: string): Promise<Regis
     await pool.query("UPDATE Users SET u_last_login = ? WHERE u_id = ?", [new Date(), user.u_id]);
 
     return { u_id: user.u_id, u_username: user.u_username, u_email: user.u_email, u_avatar: user.u_avatar, u_create_at: user.u_create_at };
+}
+
+export async function createRefreshTokenSession(input: RefreshTokenSessionInput): Promise<string> {
+    await ensureRefreshTokenTable();
+
+    const refreshToken = buildRefreshToken();
+    await pool.query(
+        `INSERT INTO User_refresh_tokens
+            (u_id, token_hash, expires_at, created_at, user_agent, ip_address)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+            input.u_id,
+            hashRefreshToken(refreshToken),
+            getRefreshExpiresAt(),
+            new Date(),
+            input.user_agent?.slice(0, 255) ?? null,
+            input.ip_address?.slice(0, 64) ?? null,
+        ]
+    );
+
+    return refreshToken;
+}
+
+export async function rotateRefreshToken(
+    refreshToken: string,
+    meta: { user_agent?: string | null; ip_address?: string | null }
+): Promise<{ user: RegisterBuyerDTO; refreshToken: string }> {
+    await ensureRefreshTokenTable();
+
+    const currentHash = hashRefreshToken(refreshToken);
+    const nextRefreshToken = buildRefreshToken();
+    const nextHash = hashRefreshToken(nextRefreshToken);
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        const [rows] = await conn.query<(RowDataPacket & {
+            urt_id: number;
+            u_id: number;
+            expires_at: Date;
+            revoked_at: Date | null;
+            u_username: string;
+            u_email: string;
+            u_avatar: string | null;
+            u_create_at: string;
+        })[]>(
+            `SELECT rt.urt_id, rt.u_id, rt.expires_at, rt.revoked_at,
+                    u.u_username, u.u_email, u.u_avatar, u.u_create_at
+             FROM User_refresh_tokens rt
+             INNER JOIN Users u ON u.u_id = rt.u_id
+             WHERE rt.token_hash = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [currentHash]
+        );
+
+        const session = rows[0];
+        if (!session || session.revoked_at || new Date(session.expires_at).getTime() <= Date.now()) {
+            throw new ApiError(401, "Refresh token หมดอายุ กรุณาเข้าสู่ระบบใหม่");
+        }
+
+        await conn.query(
+            `UPDATE User_refresh_tokens
+             SET revoked_at = ?, replaced_by_hash = ?, last_used_at = ?
+             WHERE urt_id = ?`,
+            [new Date(), nextHash, new Date(), session.urt_id]
+        );
+
+        await conn.query(
+            `INSERT INTO User_refresh_tokens
+                (u_id, token_hash, expires_at, created_at, user_agent, ip_address)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+                session.u_id,
+                nextHash,
+                getRefreshExpiresAt(),
+                new Date(),
+                meta.user_agent?.slice(0, 255) ?? null,
+                meta.ip_address?.slice(0, 64) ?? null,
+            ]
+        );
+
+        await conn.commit();
+
+        return {
+            refreshToken: nextRefreshToken,
+            user: {
+                u_id: session.u_id,
+                u_username: session.u_username,
+                u_email: session.u_email,
+                u_avatar: session.u_avatar,
+                u_create_at: session.u_create_at,
+            },
+        };
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function revokeRefreshToken(refreshToken: string): Promise<void> {
+    await ensureRefreshTokenTable();
+
+    await pool.query(
+        "UPDATE User_refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+        [new Date(), hashRefreshToken(refreshToken)]
+    );
 }
 
 // ─── Profile ────────────────────────────────────────────────────────────────

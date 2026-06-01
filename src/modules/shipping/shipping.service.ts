@@ -13,6 +13,7 @@ import type {
   CalculateInput,
   CalculateResult,
 } from "./shipping.type.js";
+import { quoteShippopRates } from "./providers/shippop.js";
 
 // ─── Carriers ────────────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ export async function listCarriers(): Promise<ShippingCarrier[]> {
 }
 
 export async function createCarrier(input: CreateCarrierInput): Promise<number> {
-  const { sc_code, sc_name, calc_type, vol_divisor = null, is_active = 1 } = input;
+  const { sc_code, sc_name, calc_type, vol_divisor = null, tracking_url_template = null, is_active = 1 } = input;
 
   if (calc_type === "CHARGEABLE_WEIGHT" && !vol_divisor) {
     throw new ApiError(400, "จำเป็นต้องระบุ vol_divisor สำหรับการคิดน้ำหนักเชิงปริมาตร");
@@ -39,12 +40,13 @@ export async function createCarrier(input: CreateCarrierInput): Promise<number> 
   }
 
   const [result] = await pool.query(
-    "INSERT INTO Shipping_carriers (sc_code, sc_name, calc_type, vol_divisor, is_active) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO Shipping_carriers (sc_code, sc_name, calc_type, vol_divisor, tracking_url_template, is_active) VALUES (?, ?, ?, ?, ?, ?)",
     [
       sc_code.toUpperCase(),
       sc_name,
       calc_type,
       calc_type === "WEIGHT_ONLY" ? null : vol_divisor,
+      tracking_url_template?.trim() || null,
       is_active,
     ]
   );
@@ -78,6 +80,11 @@ export async function updateCarrier(scId: number, input: UpdateCarrierInput): Pr
   if (input.sc_name !== undefined) { fields.push("sc_name = ?"); values.push(input.sc_name); }
   if (input.calc_type !== undefined) { fields.push("calc_type = ?"); values.push(input.calc_type); }
   if (input.vol_divisor !== undefined) { fields.push("vol_divisor = ?"); values.push(input.vol_divisor); }
+  // template นี้ใช้สร้าง tracking URL อัตโนมัติจากเลขพัสดุ เช่น https://track.example.com/{tracking_no}
+  if (input.tracking_url_template !== undefined) {
+    fields.push("tracking_url_template = ?");
+    values.push(input.tracking_url_template?.trim() || null);
+  }
   if (input.is_active !== undefined) { fields.push("is_active = ?"); values.push(input.is_active); }
 
   if (fields.length === 0) return;
@@ -365,9 +372,73 @@ export async function calculateShipping(input: CalculateInput): Promise<Calculat
     "SELECT * FROM Shipping_carriers WHERE is_active = 1 ORDER BY sc_id"
   );
 
+  // ถ้ามี origin_postcode ให้ลองใช้ราคา live จาก SHIPPOP ก่อน เพราะ checkout ควรอิงราคาจริงจาก provider
+  // rate table เดิมยังถูกใช้เป็น fallback เผื่อ SHIPPOP ล่ม/ยังไม่ได้ตั้ง API key/ต้องทดสอบใน local
+  if (input.origin_postcode) {
+    const shippopResults = await calculateShippopShipping(input, carriers as ShippingCarrier[]);
+    if (shippopResults.length > 0) return shippopResults;
+  }
+
+  return calculateManualShipping(input, carriers as ShippingCarrier[]);
+}
+
+async function calculateShippopShipping(input: CalculateInput, carriers: ShippingCarrier[]): Promise<CalculateResult[]> {
+  const originPostcode = String(input.origin_postcode ?? "");
+  const destinationPostcode = String(input.postcode ?? "");
+  const enabledCarrierByCode = new Map(carriers.map((carrier) => [carrier.sc_code.toUpperCase(), carrier]));
+
+  try {
+    const quotes = await quoteShippopRates({
+      from: {
+        name: "Origin",
+        address: "-",
+        postcode: originPostcode,
+        tel: "0000000000",
+      },
+      to: {
+        name: "Destination",
+        address: "-",
+        postcode: destinationPostcode,
+        tel: "0000000000",
+      },
+      parcel: {
+        name: "Parcel",
+        weight: Math.ceil(Number(input.weight_g)),
+        width: input.width_cm ?? 1,
+        length: input.length_cm ?? 1,
+        height: input.height_cm ?? 1,
+      },
+    });
+
+    return quotes
+      .flatMap((quote): CalculateResult[] => {
+        const carrier = enabledCarrierByCode.get(quote.courierCode);
+        if (!carrier) return [];
+
+        return [{
+          sc_id: carrier.sc_id,
+          sc_code: carrier.sc_code,
+          sc_name: carrier.sc_name || quote.courierName || carrier.sc_code,
+          calc_type: carrier.calc_type,
+          billed_weight_g: Math.ceil(Number(input.weight_g)),
+          zone_code: "SHIPPOP",
+          price: quote.price,
+          is_active: carrier.is_active,
+          source: "shippop" as const,
+        }];
+      });
+  } catch (err) {
+    if (process.env.SHIPPOP_RATE_FALLBACK !== "false") return [];
+    throw err;
+  }
+}
+
+async function calculateManualShipping(input: CalculateInput, carriers: ShippingCarrier[]): Promise<CalculateResult[]> {
+  const postcode = Number(input.postcode);
+  const weightG = Number(input.weight_g);
   const results: CalculateResult[] = [];
 
-  for (const carrier of carriers as ShippingCarrier[]) {
+  for (const carrier of carriers) {
     let billedWeight = weightG;
 
     const volumeCm3 =
@@ -411,6 +482,7 @@ export async function calculateShipping(input: CalculateInput): Promise<Calculat
       zone_code: zoneCode,
       price,
       is_active: carrier.is_active,
+      source: "manual",
     });
   }
 
