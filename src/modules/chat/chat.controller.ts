@@ -7,7 +7,7 @@ import * as service from "./chat.service.js";
 export const getOrCreateConversation = asyncHandler(async (req, res) => {
     const userId = req.userId;
     if (!userId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
-    const stId = Number(req.body?.st_id) || 1;
+    const stId = Number(req.body?.st_id) || undefined;
     const conv = await service.getOrCreateConversation(userId, stId);
     res.json({ data: conv });
 });
@@ -36,17 +36,29 @@ export const sendMessage = asyncHandler(async (req, res) => {
 
 export const adminListConversations = asyncHandler(async (req, res) => {
     const storeId = req.storeId;
+    const empId = req.empId;
 
-    if (!storeId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
-    const conversations = await service.adminGetConversations(storeId);
+    if (!storeId || !empId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
+    const conversations = await service.adminGetConversations(storeId, empId);
     res.json({ data: conversations });
+});
+
+export const adminGetOrCreateStoreConversation = asyncHandler(async (req, res) => {
+    const storeId = req.storeId;
+    if (!storeId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
+    const targetStoreId = Number(req.body?.target_store_id);
+    if (!targetStoreId) throw new ApiError(400, "target_store_id ไม่ถูกต้อง");
+    const conversation = await service.adminGetOrCreateStoreConversation(storeId, targetStoreId);
+    res.json({ data: conversation });
 });
 
 export const adminGetMessages = asyncHandler(async (req, res) => {
     const storeId = req.storeId;
-    if (!storeId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
+    const empId = req.empId;
+    if (!storeId || !empId) throw new ApiError(401, "ไม่ได้เข้าสู่ระบบ");
     const conv_id = Number(req.params.conv_id);
     if (!conv_id) throw new ApiError(400, "conv_id ไม่ถูกต้อง");
+
     const messages = await service.adminGetMessages(conv_id, storeId);
     res.json({ data: messages });
 });

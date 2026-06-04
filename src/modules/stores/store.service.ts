@@ -15,6 +15,16 @@ import type { empDTO } from "../employees/emp.type.js";
 import * as notiService from "../notifications/notification.service.js";
 import type { NotificationInput } from "../notifications/type.js";
 
+async function isPlatformStore(st_id: number): Promise<boolean> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT is_platform_store FROM Store WHERE st_id = ? LIMIT 1`,
+        [st_id],
+    );
+    const value = rows[0]?.is_platform_store;
+
+    return value === true || value === 1 || value === "1";
+}
+
 
 export async function listStores(): Promise<StoreDTO[]> {
 
@@ -339,6 +349,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
         await conn.beginTransaction();
 
         const st_id = input.st_id; // ได้มาจาก token
+        const createdByPlatformStore = await isPlatformStore(st_id);
 
 
         // ===== 1. Insert ตาราง stores (ตารางหลัก) =====
@@ -351,7 +362,8 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
             st_phone: input.st_phone,
             st_image: input.st_image,
             bk_id: input.bk_id,
-            st_status: st_id === 1 ? "ACTIVE" : "PENDING", // หรือค่าเริ่มต้นที่คุณต้องการ
+            st_status: createdByPlatformStore ? "ACTIVE" : "PENDING",
+            is_platform_store: input.is_platform_store ?? false,
         };
 
 
@@ -410,12 +422,12 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
         const owner = input.employees.find(e => e.e_status === 'Owner')
         const logData = {
             st_id: stId,
-            stl_type: mapStatusToType(st_id === 1 ? "ACTIVE" : "PENDING"),
-            stl_actor: st_id === 1
+            stl_type: mapStatusToType(createdByPlatformStore ? "ACTIVE" : "PENDING"),
+            stl_actor: createdByPlatformStore
                 ? `${eData?.e_status ?? 'Admin'} ${eData?.e_firstname ?? 'Arcana'}`
                 : `${owner?.e_status ?? ''} ${owner?.e_firstname ?? ''}`.trim(),
-            stl_action: mapStatusToAction(st_id === 1 ? "ACTIVE" : "PENDING"),
-            stl_node: st_id === 1 ? "Admin Arcana Create Store" : "Owner Create Store",
+            stl_action: mapStatusToAction(createdByPlatformStore ? "ACTIVE" : "PENDING"),
+            stl_node: createdByPlatformStore ? "Admin Arcana Create Store" : "Owner Create Store",
             stl_timestamp: new Date(),
         }
         await conn.query<ResultSetHeader>(`INSERT INTO Store_Logs SET ?`, [logData])
@@ -535,14 +547,25 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
 export async function updateStore(st_id: number, input: UpdateStoreInput): Promise<void> {
     try {
 
-        const data = {
+        const data: {
+            st_company_name: string;
+            bank_account_number: string;
+            st_email: string;
+            st_phone: string;
+            st_image: string | undefined;
+            bk_id: number;
+            omise_recipient_id?: string | null;
+        } = {
             st_company_name: input.st_company_name,
             bank_account_number: input.bank_account_number,
             st_email: input.st_email,
             st_phone: input.st_phone,
             st_image: input.st_image,
             bk_id: input.bk_id
-        } = input;
+        };
+        if (input.omise_recipient_id !== undefined) {
+            data.omise_recipient_id = input.omise_recipient_id;
+        }
         const [res] = await pool.query<ResultSetHeader>(`UPDATE Store SET ? WHERE st_id = ?`, [data, st_id]);
         if (res.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);

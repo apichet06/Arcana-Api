@@ -280,6 +280,7 @@ export const createRegister = asyncHandler(async (req, res) => {
             tax_seller_type: req.body.tax_seller_type,
             st_idcard: req.body.st_idcard,
             st_status: req.body.st_status,
+            is_platform_store: req.body.is_platform_store === "true",
 
             legal_name: req.body.legal_name,
             tax_id_number: req.body.tax_id_number,
@@ -337,7 +338,7 @@ export const createRegister = asyncHandler(async (req, res) => {
 
 export const update = asyncHandler(async (req, res) => {
     const { st_id } = req.params;
-    const { st_company_name, bank_account_number, st_email, st_phone, bk_id } = req.body;
+    const { st_company_name, bank_account_number, omise_recipient_id, st_email, st_phone, bk_id } = req.body;
     const empId = Number(req.empId);
     const file = req.file;
     const oldImage = await store.getStoreById(Number(st_id)).then(store => store?.store.st_image);
@@ -359,7 +360,15 @@ export const update = asyncHandler(async (req, res) => {
     }
 
 
-    const input = { st_company_name, bank_account_number, st_email, st_phone, st_image: imagePath, bk_id };
+    const input = {
+        st_company_name,
+        bank_account_number,
+        ...(omise_recipient_id !== undefined ? { omise_recipient_id: omise_recipient_id ? String(omise_recipient_id).trim() : null } : {}),
+        st_email,
+        st_phone,
+        st_image: imagePath,
+        bk_id,
+    };
     await store.updateStore(Number(st_id), input);
     res.status(200).json({ message: CommonMessages.updateSuccess });
 });

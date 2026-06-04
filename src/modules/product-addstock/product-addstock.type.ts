@@ -48,4 +48,27 @@ export type InventoryLogResponse = {
     e_id: number
     poi_values: string
     e_firstname: string
+    pv_sku?: string
+    p_name?: string
+    loc_name?: string
+    province?: string
+}
+
+export type InactiveStockResponse = {
+    inv_id: number
+    st_id: number
+    pv_id: number
+    loc_id: number
+    p_id: number
+    p_name: string
+    pv_sku: string
+    image_url: string | null
+    poi_values: string | null
+    on_hand: number
+    reserved_qty: number
+    loc_name: string
+    province: string
+    last_sold_at: string | null
+    sold_qty: number
+    inactive_days: number | null
 }

@@ -32,3 +32,16 @@ export const ListInventoryLog = asyncHandler(async (req, res) => {
     res.status(200).json({ data });
 
 })
+
+export const ListInventoryMovement = asyncHandler(async (req, res) => {
+    const { st_id, log_code } = req.params;
+    const data = await productaddstock.ListInventoryMovement(Number(st_id), String(log_code));
+    res.status(200).json({ data });
+})
+
+export const ListInactiveStock = asyncHandler(async (req, res) => {
+    const { st_id, log_code } = req.params;
+    const days = Number(req.query.days ?? 60);
+    const data = await productaddstock.ListInactiveStock(Number(st_id), String(log_code), days);
+    res.status(200).json({ data });
+})

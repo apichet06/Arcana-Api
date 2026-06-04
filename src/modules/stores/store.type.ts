@@ -47,17 +47,23 @@ export type StoreLogDTO = {
 
 export type StoreDTO = {
     st_id: number;
+    st_number: string;
     st_company_name: string;
     st_idcard: string;
-    account_number: string;
-    omise_recipient_id: string;
+    bank_account_number: string;
+    omise_recipient_id: string | null;
     st_email: string;
     created_at: string;
     st_phone: string;
     st_image: string;
+    st_status: StoreStatus;
+    st_note: string | null;
+    is_platform_store: boolean | 0 | 1 | "0" | "1";
     e_id: number;
     bk_id: number;
     bk_name: string;
+    account_name: string | null;
+    updated_at: string | null;
 }
 
 // types/store.shared.ts
@@ -124,6 +130,7 @@ export interface CreateStoreRegisterInput {
     bk_id: number;
     tax_seller_type: SellerType;
     st_status: string;
+    is_platform_store?: boolean;
 
 
     legal_name: string;
@@ -162,6 +169,7 @@ export type CreateStoreInput = {
 export type UpdateStoreInput = {
     st_company_name: string;
     bank_account_number: string;
+    omise_recipient_id?: string | null;
     st_email: string;
     st_phone: string;
     st_image: string | undefined;

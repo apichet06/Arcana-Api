@@ -16,6 +16,7 @@ export type empDTO = {
     st_company_name: string;
     st_id: number,
     st_image: string;
+    is_platform_store: boolean | 0 | 1 | "0" | "1";
 }
 
 export type CreateEmpInput = {

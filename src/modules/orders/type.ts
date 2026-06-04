@@ -130,6 +130,212 @@ export type AdminOrderSummaryDTO = {
     coupon_discount_total: number;
 };
 
+export type AdminSalesReportRowDTO = {
+    or_id: number;
+    order_no: string;
+    st_id: number;
+    st_company_name: string | null;
+    customer_name: string;
+    status_code: string | null;
+    status_label: string | null;
+    sale_date: string;
+    item_count: number;
+    subtotal: number;
+    discount_total: number;
+    shipping_fee: number;
+    grand_total: number;
+    refund_total: number;
+    net_sales: number;
+    payment_method: string | null;
+    payment_status: string | null;
+};
+
+export type AdminSalesReportSummaryDTO = {
+    order_count: number;
+    item_count: number;
+    subtotal: number;
+    discount_total: number;
+    shipping_fee: number;
+    gross_sales: number;
+    refund_total: number;
+    net_sales: number;
+    average_order_value: number;
+};
+
+export type AdminSalesReportDTO = {
+    summary: AdminSalesReportSummaryDTO;
+    rows: AdminSalesReportRowDTO[];
+};
+
+export type AdminSalesByProductRowDTO = {
+    p_id: number;
+    pv_id: number;
+    sku: string | null;
+    product_name: string;
+    variant_name: string | null;
+    st_id: number | null;
+    st_company_name: string | null;
+    order_count: number;
+    qty_sold: number;
+    gross_sales: number;
+    discount_total: number;
+    net_sales: number;
+    average_unit_price: number;
+};
+
+export type AdminSalesByProductSummaryDTO = {
+    product_count: number;
+    order_count: number;
+    qty_sold: number;
+    gross_sales: number;
+    discount_total: number;
+    net_sales: number;
+};
+
+export type AdminSalesByProductReportDTO = {
+    summary: AdminSalesByProductSummaryDTO;
+    rows: AdminSalesByProductRowDTO[];
+};
+
+export type AdminSalesByCategoryRowDTO = {
+    c_id: number;
+    category_name: string;
+    catalog_name: string | null;
+    order_count: number;
+    product_count: number;
+    qty_sold: number;
+    gross_sales: number;
+    discount_total: number;
+    net_sales: number;
+    average_unit_price: number;
+};
+
+export type AdminSalesByCategorySummaryDTO = {
+    category_count: number;
+    order_count: number;
+    product_count: number;
+    qty_sold: number;
+    gross_sales: number;
+    discount_total: number;
+    net_sales: number;
+};
+
+export type AdminSalesByCategoryReportDTO = {
+    summary: AdminSalesByCategorySummaryDTO;
+    rows: AdminSalesByCategoryRowDTO[];
+};
+
+export type AdminSalesByBuyerRowDTO = {
+    u_id: number;
+    customer_name: string;
+    st_id: number;
+    st_company_name: string | null;
+    order_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    net_sales: number;
+    average_order_value: number;
+    latest_sale_date: string | null;
+};
+
+export type AdminSalesByBuyerSummaryDTO = {
+    buyer_count: number;
+    store_count: number;
+    order_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    net_sales: number;
+    average_per_buyer: number;
+    repeat_buyer_count: number;
+    repeat_buyer_rate: number;
+};
+
+export type AdminSalesByBuyerReportDTO = {
+    summary: AdminSalesByBuyerSummaryDTO;
+    rows: AdminSalesByBuyerRowDTO[];
+};
+
+export type AdminSalesByVendorRowDTO = {
+    st_id: number;
+    st_number: string | null;
+    st_company_name: string | null;
+    order_count: number;
+    buyer_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    net_sales: number;
+    average_order_value: number;
+    latest_sale_date: string | null;
+};
+
+export type AdminSalesByVendorSummaryDTO = {
+    vendor_count: number;
+    order_count: number;
+    buyer_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    net_sales: number;
+    average_per_vendor: number;
+};
+
+export type AdminSalesByVendorReportDTO = {
+    summary: AdminSalesByVendorSummaryDTO;
+    rows: AdminSalesByVendorRowDTO[];
+};
+
+export type AdminPayoutSettingDTO = {
+    payout_cycle_days: number;
+    updated_at: string | null;
+};
+
+export type AdminPendingPayoutRowDTO = {
+    st_id: number;
+    st_number: string | null;
+    st_company_name: string | null;
+    omise_recipient_id: string | null;
+    bk_name: string | null;
+    bank_account_number: string | null;
+    order_count: number;
+    buyer_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    pending_payout: number;
+    due_payout: number;
+    future_payout: number;
+    earliest_sale_date: string | null;
+    latest_sale_date: string | null;
+    next_payout_date: string | null;
+};
+
+export type AdminPendingPayoutSummaryDTO = {
+    vendor_count: number;
+    order_count: number;
+    buyer_count: number;
+    item_count: number;
+    gross_sales: number;
+    discount_total: number;
+    refund_total: number;
+    pending_payout: number;
+    due_payout: number;
+    future_payout: number;
+};
+
+export type AdminPendingPayoutReportDTO = {
+    setting: AdminPayoutSettingDTO;
+    summary: AdminPendingPayoutSummaryDTO;
+    rows: AdminPendingPayoutRowDTO[];
+};
+
 export type OrderDetailDTO = OrderDTO & {
     items: OrderItemDTO[];
     shipments?: OrderShipmentDTO[];

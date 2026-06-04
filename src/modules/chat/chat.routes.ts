@@ -12,6 +12,7 @@ chatRouter.post("/conversations/:conv_id/messages", BuyerAuth, controller.sendMe
 
 // Admin routes (employee JWT)
 chatRouter.get("/admin/conversations", Auth, controller.adminListConversations);
+chatRouter.post("/admin/store-conversation", Auth, controller.adminGetOrCreateStoreConversation);
 chatRouter.get("/admin/conversations/:conv_id/messages", Auth, controller.adminGetMessages);
 chatRouter.patch("/admin/conversations/:conv_id/read", Auth, controller.adminMarkAsRead);
 chatRouter.post("/admin/conversations/:conv_id/messages", Auth, controller.adminSendMessage);

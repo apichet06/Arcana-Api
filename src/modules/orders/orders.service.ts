@@ -1,7 +1,7 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool } from "../../db/pool.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
-import type { AdminOrderDTO, AdminOrderSummaryDTO, CheckoutOrderInput, CreateOrderInput, OrderDetailDTO, OrderDTO, OrderItemDTO, OrderShipmentDTO, OrderShipmentItemDTO } from "./type.js";
+import type { AdminOrderDTO, AdminOrderSummaryDTO, AdminPayoutSettingDTO, AdminPendingPayoutReportDTO, AdminPendingPayoutRowDTO, AdminSalesByBuyerReportDTO, AdminSalesByBuyerRowDTO, AdminSalesByCategoryReportDTO, AdminSalesByCategoryRowDTO, AdminSalesByProductReportDTO, AdminSalesByProductRowDTO, AdminSalesByVendorReportDTO, AdminSalesByVendorRowDTO, AdminSalesReportDTO, AdminSalesReportRowDTO, CheckoutOrderInput, CreateOrderInput, OrderDetailDTO, OrderDTO, OrderItemDTO, OrderShipmentDTO, OrderShipmentItemDTO } from "./type.js";
 import * as couponService from "../coupons/coupon.service.js";
 import * as shippingService from "../shipping/shipping.service.js";
 import type { CalculateResult } from "../shipping/shipping.type.js";
@@ -35,6 +35,7 @@ const ADMIN_STATUS_TRANSITIONS: Record<string, OrderStatusCode> = {
 
 let orderShipmentLabelColumnReady: Promise<void> | null = null;
 let orderShipmentTablesReady: Promise<void> | null = null;
+let payoutSettingsTableReady: Promise<void> | null = null;
 
 function roundMoney(value: number): number {
     return Math.round(value * 100) / 100;
@@ -113,6 +114,35 @@ async function ensureOrderShipmentTables(): Promise<void> {
     })();
 
     return orderShipmentTablesReady;
+}
+
+async function ensurePayoutSettingsTable(): Promise<void> {
+    payoutSettingsTableReady ??= pool.query(`
+        CREATE TABLE IF NOT EXISTS Payout_settings (
+            ps_id TINYINT NOT NULL,
+            payout_cycle_days INT NOT NULL DEFAULT 7,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (ps_id)
+        )
+    `)
+        .then(async () => {
+            await pool.query(
+                `INSERT INTO Payout_settings (ps_id, payout_cycle_days)
+                 VALUES (1, 7)
+                 ON DUPLICATE KEY UPDATE ps_id = ps_id`
+            );
+        })
+        .then(() => undefined);
+
+    return payoutSettingsTableReady;
+}
+
+function normalizePayoutCycleDays(value: number): number {
+    const days = Math.trunc(Number(value));
+    if (!Number.isFinite(days) || days < 1 || days > 365) {
+        throw new ApiError(400, "จำนวนวันรอบจ่ายต้องอยู่ระหว่าง 1 ถึง 365 วัน");
+    }
+    return days;
 }
 
 type CheckoutCartItemRow = RowDataPacket & {
@@ -1488,6 +1518,717 @@ export async function adminGetOrderSummary(st_id: number): Promise<AdminOrderSum
         shipped_orders: Number(summary?.shipped_orders ?? 0),
         coupon_discount_total: Number(summary?.coupon_discount_total ?? 0),
     };
+}
+
+export async function adminGetSalesReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminSalesReportDTO> {
+    const params: (number | string)[] = [];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminSalesReportRowDTO)[]>(
+        `SELECT
+            o.or_id,
+            o.order_no,
+            o.st_id,
+            st.st_company_name,
+            COALESCE(NULLIF(u.u_username, ''), o.shipping_name, CONCAT('Customer #', o.u_id)) AS customer_name,
+            os.s_code AS status_code,
+            osl.s_name AS status_label,
+            COALESCE(pay.paid_at, o.created_at) AS sale_date,
+            COALESCE(item_summary.item_count, 0) AS item_count,
+            COALESCE(item_summary.item_gross_total, o.subtotal) AS subtotal,
+            COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0) AS discount_total,
+            o.shipping_fee,
+            o.grand_total,
+            COALESCE(refund.refund_total, 0) AS refund_total,
+            GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0) AS net_sales,
+            pay.payment_method,
+            pay.payment_status
+        FROM Orders o
+        LEFT JOIN Users u ON u.u_id = o.u_id
+        LEFT JOIN Store st ON st.st_id = o.st_id
+        LEFT JOIN Status os ON os.s_id = o.s_id
+        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = 'th'
+        LEFT JOIN (
+            SELECT
+                or_id,
+                COUNT(oi_id) AS item_count,
+                SUM(unit_price * qty) AS item_gross_total,
+                SUM(discount_amount * qty) AS item_discount_total
+            FROM Order_items
+            GROUP BY or_id
+        ) item_summary ON item_summary.or_id = o.or_id
+        LEFT JOIN (
+            SELECT
+                po.or_id,
+                MAX(p.paid_at) AS paid_at,
+                MAX(p.payment_method) AS payment_method,
+                MAX(p.payment_status) AS payment_status
+            FROM Payment_orders po
+            INNER JOIN Payments p ON p.pay_id = po.pay_id
+            WHERE p.payment_status = 'paid'
+            GROUP BY po.or_id
+        ) pay ON pay.or_id = o.or_id
+        LEFT JOIN (
+            SELECT or_id, SUM(amount) AS refund_total
+            FROM Refunds
+            WHERE status = 'succeeded'
+            GROUP BY or_id
+        ) refund ON refund.or_id = o.or_id
+        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+            ${storeSql}
+            ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        GROUP BY
+            o.or_id, o.order_no, o.st_id, st.st_company_name, customer_name,
+            os.s_code, osl.s_name, sale_date, item_summary.item_count,
+            item_summary.item_gross_total, item_summary.item_discount_total, o.subtotal, o.discount_total,
+            o.shipping_fee, o.grand_total, refund.refund_total,
+            pay.payment_method, pay.payment_status
+        ORDER BY sale_date DESC, o.or_id DESC`,
+        params
+    );
+
+    const summary = rows.reduce(
+        (total, row) => {
+            total.order_count += 1;
+            total.item_count += Number(row.item_count ?? 0);
+            total.subtotal += Number(row.subtotal ?? 0);
+            total.discount_total += Number(row.discount_total ?? 0);
+            total.shipping_fee += Number(row.shipping_fee ?? 0);
+            total.gross_sales += Number(row.subtotal ?? 0) + Number(row.shipping_fee ?? 0);
+            total.refund_total += Number(row.refund_total ?? 0);
+            total.net_sales += Number(row.net_sales ?? 0);
+            return total;
+        },
+        {
+            order_count: 0,
+            item_count: 0,
+            subtotal: 0,
+            discount_total: 0,
+            shipping_fee: 0,
+            gross_sales: 0,
+            refund_total: 0,
+            net_sales: 0,
+            average_order_value: 0,
+        }
+    );
+
+    summary.average_order_value = summary.order_count > 0 ? summary.net_sales / summary.order_count : 0;
+
+    return {
+        summary,
+        rows: rows.map((row) => ({
+            ...row,
+            item_count: Number(row.item_count ?? 0),
+            subtotal: Number(row.subtotal ?? 0),
+            discount_total: Number(row.discount_total ?? 0),
+            shipping_fee: Number(row.shipping_fee ?? 0),
+            grand_total: Number(row.grand_total ?? 0),
+            refund_total: Number(row.refund_total ?? 0),
+            net_sales: Number(row.net_sales ?? 0),
+        })),
+    };
+}
+
+export async function adminGetSalesByProductReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminSalesByProductReportDTO> {
+    const params: (number | string)[] = [];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminSalesByProductRowDTO)[]>(
+        `SELECT
+            oi.p_id,
+            oi.pv_id,
+            oi.sku,
+            COALESCE(pl.p_name, oi.product_name) AS product_name,
+            oi.variant_name,
+            p.st_id,
+            st.st_company_name,
+            COUNT(DISTINCT o.or_id) AS order_count,
+            SUM(oi.qty) AS qty_sold,
+            SUM(oi.unit_price * oi.qty) AS gross_sales,
+            SUM(oi.discount_amount * oi.qty) AS discount_total,
+            SUM(oi.line_total) AS net_sales,
+            CASE WHEN SUM(oi.qty) > 0 THEN SUM(oi.line_total) / SUM(oi.qty) ELSE 0 END AS average_unit_price
+        FROM Order_items oi
+        INNER JOIN Orders o ON o.or_id = oi.or_id
+        INNER JOIN Status os ON os.s_id = o.s_id
+        LEFT JOIN Products p ON p.p_id = oi.p_id
+        LEFT JOIN ProductLangs pl ON pl.p_id = oi.p_id AND pl.lg_code = 'th'
+        LEFT JOIN Store st ON st.st_id = p.st_id
+        LEFT JOIN (
+            SELECT po.or_id, MAX(paid.paid_at) AS paid_at
+            FROM Payment_orders po
+            INNER JOIN Payments paid ON paid.pay_id = po.pay_id
+            WHERE paid.payment_status = 'paid'
+            GROUP BY po.or_id
+        ) pay ON pay.or_id = o.or_id
+        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP')
+            ${storeSql}
+            ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        GROUP BY
+            oi.p_id, oi.pv_id, oi.sku, product_name, oi.variant_name,
+            p.st_id, st.st_company_name
+        ORDER BY net_sales DESC, qty_sold DESC`,
+        params
+    );
+
+    // รายงานนี้ไม่คำนวณกำไร เพราะระบบไม่เก็บต้นทุนตามนโยบายความปลอดภัยของร้านค้า
+    const normalizedRows = rows.map((row) => ({
+        ...row,
+        p_id: Number(row.p_id ?? 0),
+        pv_id: Number(row.pv_id ?? 0),
+        st_id: row.st_id === null ? null : Number(row.st_id ?? 0),
+        order_count: Number(row.order_count ?? 0),
+        qty_sold: Number(row.qty_sold ?? 0),
+        gross_sales: Number(row.gross_sales ?? 0),
+        discount_total: Number(row.discount_total ?? 0),
+        net_sales: Number(row.net_sales ?? 0),
+        average_unit_price: Number(row.average_unit_price ?? 0),
+    }));
+
+    const summary = normalizedRows.reduce(
+        (total, row) => {
+            total.product_count += 1;
+            total.order_count += row.order_count;
+            total.qty_sold += row.qty_sold;
+            total.gross_sales += row.gross_sales;
+            total.discount_total += row.discount_total;
+            total.net_sales += row.net_sales;
+            return total;
+        },
+        {
+            product_count: 0,
+            order_count: 0,
+            qty_sold: 0,
+            gross_sales: 0,
+            discount_total: 0,
+            net_sales: 0,
+        }
+    );
+
+    return { summary, rows: normalizedRows };
+}
+
+export async function adminGetSalesByCategoryReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminSalesByCategoryReportDTO> {
+    const params: (number | string)[] = [];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminSalesByCategoryRowDTO)[]>(
+        `SELECT
+            COALESCE(c.c_id, 0) AS c_id,
+            COALESCE(cl.cl_name, 'ไม่พบหมวดหมู่') AS category_name,
+            ctl.ctl_name AS catalog_name,
+            COUNT(DISTINCT o.or_id) AS order_count,
+            COUNT(DISTINCT oi.p_id) AS product_count,
+            SUM(oi.qty) AS qty_sold,
+            SUM(oi.unit_price * oi.qty) AS gross_sales,
+            SUM(oi.discount_amount * oi.qty) AS discount_total,
+            SUM(oi.line_total) AS net_sales,
+            CASE WHEN SUM(oi.qty) > 0 THEN SUM(oi.line_total) / SUM(oi.qty) ELSE 0 END AS average_unit_price
+        FROM Order_items oi
+        INNER JOIN Orders o ON o.or_id = oi.or_id
+        INNER JOIN Status os ON os.s_id = o.s_id
+        LEFT JOIN Products p ON p.p_id = oi.p_id
+        LEFT JOIN Categorys c ON c.c_id = p.c_id
+        LEFT JOIN CategoryLangs cl ON cl.c_id = c.c_id AND cl.lg_code = 'th'
+        LEFT JOIN Catalog ctl ON ctl.ctl_id = c.ctl_id
+        LEFT JOIN (
+            SELECT po.or_id, MAX(paid.paid_at) AS paid_at
+            FROM Payment_orders po
+            INNER JOIN Payments paid ON paid.pay_id = po.pay_id
+            WHERE paid.payment_status = 'paid'
+            GROUP BY po.or_id
+        ) pay ON pay.or_id = o.or_id
+        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP')
+            ${storeSql}
+            ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        GROUP BY c_id, category_name, catalog_name
+        ORDER BY net_sales DESC, qty_sold DESC`,
+        params
+    );
+
+    // รายงานตามหมวดใช้ยอดขายสุทธิเท่านั้น เพราะระบบไม่เก็บต้นทุนสินค้าเพื่อคำนวณกำไร
+    const normalizedRows = rows.map((row) => ({
+        ...row,
+        c_id: Number(row.c_id ?? 0),
+        order_count: Number(row.order_count ?? 0),
+        product_count: Number(row.product_count ?? 0),
+        qty_sold: Number(row.qty_sold ?? 0),
+        gross_sales: Number(row.gross_sales ?? 0),
+        discount_total: Number(row.discount_total ?? 0),
+        net_sales: Number(row.net_sales ?? 0),
+        average_unit_price: Number(row.average_unit_price ?? 0),
+    }));
+
+    const summary = normalizedRows.reduce(
+        (total, row) => {
+            total.category_count += 1;
+            total.order_count += row.order_count;
+            total.product_count += row.product_count;
+            total.qty_sold += row.qty_sold;
+            total.gross_sales += row.gross_sales;
+            total.discount_total += row.discount_total;
+            total.net_sales += row.net_sales;
+            return total;
+        },
+        {
+            category_count: 0,
+            order_count: 0,
+            product_count: 0,
+            qty_sold: 0,
+            gross_sales: 0,
+            discount_total: 0,
+            net_sales: 0,
+        }
+    );
+
+    return { summary, rows: normalizedRows };
+}
+
+export async function adminGetSalesByBuyerReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminSalesByBuyerReportDTO> {
+    const params: (number | string)[] = [];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminSalesByBuyerRowDTO)[]>(
+        `SELECT
+            o.u_id,
+            COALESCE(NULLIF(u.u_username, ''), o.shipping_name, CONCAT('Customer #', o.u_id)) AS customer_name,
+            o.st_id,
+            st.st_company_name,
+            COUNT(DISTINCT o.or_id) AS order_count,
+            SUM(COALESCE(item_summary.item_count, 0)) AS item_count,
+            SUM(COALESCE(item_summary.item_gross_total, o.subtotal) + COALESCE(o.shipping_fee, 0)) AS gross_sales,
+            SUM(COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0)) AS discount_total,
+            SUM(COALESCE(refund.refund_total, 0)) AS refund_total,
+            SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) AS net_sales,
+            CASE
+                WHEN COUNT(DISTINCT o.or_id) > 0
+                THEN SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) / COUNT(DISTINCT o.or_id)
+                ELSE 0
+            END AS average_order_value,
+            MAX(COALESCE(pay.paid_at, o.created_at)) AS latest_sale_date
+        FROM Orders o
+        LEFT JOIN Users u ON u.u_id = o.u_id
+        LEFT JOIN Store st ON st.st_id = o.st_id
+        LEFT JOIN Status os ON os.s_id = o.s_id
+        LEFT JOIN (
+            SELECT
+                or_id,
+                COUNT(oi_id) AS item_count,
+                SUM(unit_price * qty) AS item_gross_total,
+                SUM(discount_amount * qty) AS item_discount_total
+            FROM Order_items
+            GROUP BY or_id
+        ) item_summary ON item_summary.or_id = o.or_id
+        LEFT JOIN (
+            SELECT
+                po.or_id,
+                MAX(p.paid_at) AS paid_at
+            FROM Payment_orders po
+            INNER JOIN Payments p ON p.pay_id = po.pay_id
+            WHERE p.payment_status = 'paid'
+            GROUP BY po.or_id
+        ) pay ON pay.or_id = o.or_id
+        LEFT JOIN (
+            SELECT or_id, SUM(amount) AS refund_total
+            FROM Refunds
+            WHERE status = 'succeeded'
+            GROUP BY or_id
+        ) refund ON refund.or_id = o.or_id
+        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+            ${storeSql}
+            ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        GROUP BY o.u_id, customer_name, o.st_id, st.st_company_name
+        ORDER BY net_sales DESC, latest_sale_date DESC`,
+        params
+    );
+
+    // Normalize MySQL aggregate values before calculating summary so the API always returns numbers.
+    const normalizedRows = rows.map((row) => ({
+        ...row,
+        u_id: Number(row.u_id ?? 0),
+        st_id: Number(row.st_id ?? 0),
+        order_count: Number(row.order_count ?? 0),
+        item_count: Number(row.item_count ?? 0),
+        gross_sales: Number(row.gross_sales ?? 0),
+        discount_total: Number(row.discount_total ?? 0),
+        refund_total: Number(row.refund_total ?? 0),
+        net_sales: Number(row.net_sales ?? 0),
+        average_order_value: Number(row.average_order_value ?? 0),
+    }));
+
+    const storeIds = new Set<number>();
+    const summary = normalizedRows.reduce(
+        (total, row) => {
+            storeIds.add(row.st_id);
+            total.buyer_count += 1;
+            total.order_count += row.order_count;
+            total.item_count += row.item_count;
+            total.gross_sales += row.gross_sales;
+            total.discount_total += row.discount_total;
+            total.refund_total += row.refund_total;
+            total.net_sales += row.net_sales;
+            if (row.order_count > 1) total.repeat_buyer_count += 1;
+            return total;
+        },
+        {
+            buyer_count: 0,
+            store_count: 0,
+            order_count: 0,
+            item_count: 0,
+            gross_sales: 0,
+            discount_total: 0,
+            refund_total: 0,
+            net_sales: 0,
+            average_per_buyer: 0,
+            repeat_buyer_count: 0,
+            repeat_buyer_rate: 0,
+        }
+    );
+
+    summary.store_count = storeIds.size;
+    summary.average_per_buyer = summary.buyer_count > 0 ? summary.net_sales / summary.buyer_count : 0;
+    summary.repeat_buyer_rate = summary.buyer_count > 0 ? (summary.repeat_buyer_count / summary.buyer_count) * 100 : 0;
+
+    return { summary, rows: normalizedRows };
+}
+
+export async function adminGetSalesByVendorReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminSalesByVendorReportDTO> {
+    const params: (number | string)[] = [];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminSalesByVendorRowDTO)[]>(
+        `SELECT
+            o.st_id,
+            st.st_number,
+            st.st_company_name,
+            COUNT(DISTINCT o.or_id) AS order_count,
+            COUNT(DISTINCT o.u_id) AS buyer_count,
+            SUM(COALESCE(item_summary.item_count, 0)) AS item_count,
+            SUM(COALESCE(item_summary.item_gross_total, o.subtotal) + COALESCE(o.shipping_fee, 0)) AS gross_sales,
+            SUM(COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0)) AS discount_total,
+            SUM(COALESCE(refund.refund_total, 0)) AS refund_total,
+            SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) AS net_sales,
+            CASE
+                WHEN COUNT(DISTINCT o.or_id) > 0
+                THEN SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) / COUNT(DISTINCT o.or_id)
+                ELSE 0
+            END AS average_order_value,
+            MAX(COALESCE(pay.paid_at, o.created_at)) AS latest_sale_date
+        FROM Orders o
+        LEFT JOIN Store st ON st.st_id = o.st_id
+        LEFT JOIN Status os ON os.s_id = o.s_id
+        LEFT JOIN (
+            SELECT
+                or_id,
+                COUNT(oi_id) AS item_count,
+                SUM(unit_price * qty) AS item_gross_total,
+                SUM(discount_amount * qty) AS item_discount_total
+            FROM Order_items
+            GROUP BY or_id
+        ) item_summary ON item_summary.or_id = o.or_id
+        LEFT JOIN (
+            SELECT
+                po.or_id,
+                MAX(p.paid_at) AS paid_at
+            FROM Payment_orders po
+            INNER JOIN Payments p ON p.pay_id = po.pay_id
+            WHERE p.payment_status = 'paid'
+            GROUP BY po.or_id
+        ) pay ON pay.or_id = o.or_id
+        LEFT JOIN (
+            SELECT or_id, SUM(amount) AS refund_total
+            FROM Refunds
+            WHERE status = 'succeeded'
+            GROUP BY or_id
+        ) refund ON refund.or_id = o.or_id
+        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+            ${storeSql}
+            ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        GROUP BY o.st_id, st.st_number, st.st_company_name
+        ORDER BY net_sales DESC, latest_sale_date DESC`,
+        params
+    );
+
+    const normalizedRows = rows.map((row) => ({
+        ...row,
+        st_id: Number(row.st_id ?? 0),
+        order_count: Number(row.order_count ?? 0),
+        buyer_count: Number(row.buyer_count ?? 0),
+        item_count: Number(row.item_count ?? 0),
+        gross_sales: Number(row.gross_sales ?? 0),
+        discount_total: Number(row.discount_total ?? 0),
+        refund_total: Number(row.refund_total ?? 0),
+        net_sales: Number(row.net_sales ?? 0),
+        average_order_value: Number(row.average_order_value ?? 0),
+    }));
+
+    const summary = normalizedRows.reduce(
+        (total, row) => {
+            total.vendor_count += 1;
+            total.order_count += row.order_count;
+            total.item_count += row.item_count;
+            total.gross_sales += row.gross_sales;
+            total.discount_total += row.discount_total;
+            total.refund_total += row.refund_total;
+            total.net_sales += row.net_sales;
+            return total;
+        },
+        {
+            vendor_count: 0,
+            order_count: 0,
+            buyer_count: 0,
+            item_count: 0,
+            gross_sales: 0,
+            discount_total: 0,
+            refund_total: 0,
+            net_sales: 0,
+            average_per_vendor: 0,
+        }
+    );
+
+    summary.buyer_count = normalizedRows.reduce((total, row) => total + row.buyer_count, 0);
+    summary.average_per_vendor = summary.vendor_count > 0 ? summary.net_sales / summary.vendor_count : 0;
+
+    return { summary, rows: normalizedRows };
+}
+
+export async function adminGetPayoutSetting(): Promise<AdminPayoutSettingDTO> {
+    await ensurePayoutSettingsTable();
+
+    const [rows] = await pool.query<(RowDataPacket & AdminPayoutSettingDTO)[]>(
+        "SELECT payout_cycle_days, updated_at FROM Payout_settings WHERE ps_id = 1 LIMIT 1"
+    );
+
+    return {
+        payout_cycle_days: Number(rows[0]?.payout_cycle_days ?? 7),
+        updated_at: rows[0]?.updated_at ?? null,
+    };
+}
+
+export async function adminUpdatePayoutSetting(payout_cycle_days: number): Promise<AdminPayoutSettingDTO> {
+    await ensurePayoutSettingsTable();
+    const days = normalizePayoutCycleDays(payout_cycle_days);
+
+    await pool.query(
+        `INSERT INTO Payout_settings (ps_id, payout_cycle_days, updated_at)
+         VALUES (1, ?, NOW())
+         ON DUPLICATE KEY UPDATE payout_cycle_days = VALUES(payout_cycle_days), updated_at = NOW()`,
+        [days]
+    );
+
+    return adminGetPayoutSetting();
+}
+
+export async function adminGetPendingPayoutReport(
+    st_id: number,
+    filters: { start_date?: string; end_date?: string } = {}
+): Promise<AdminPendingPayoutReportDTO> {
+    const setting = await adminGetPayoutSetting();
+    const params: (number | string)[] = [setting.payout_cycle_days];
+    const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+    if (storeSql) params.push(st_id);
+
+    const dateSql: string[] = [];
+    if (filters.start_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        params.push(filters.start_date);
+    }
+    if (filters.end_date) {
+        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        params.push(filters.end_date);
+    }
+
+    const [rows] = await pool.query<(RowDataPacket & AdminPendingPayoutRowDTO)[]>(
+        `SELECT
+            sale.st_id,
+            sale.st_number,
+            sale.st_company_name,
+            sale.omise_recipient_id,
+            sale.bk_name,
+            sale.bank_account_number,
+            COUNT(DISTINCT sale.or_id) AS order_count,
+            COUNT(DISTINCT sale.u_id) AS buyer_count,
+            SUM(sale.item_count) AS item_count,
+            SUM(sale.gross_sales) AS gross_sales,
+            SUM(sale.discount_total) AS discount_total,
+            SUM(sale.refund_total) AS refund_total,
+            SUM(sale.net_sales) AS pending_payout,
+            SUM(CASE WHEN sale.payout_date <= CURDATE() THEN sale.net_sales ELSE 0 END) AS due_payout,
+            SUM(CASE WHEN sale.payout_date > CURDATE() THEN sale.net_sales ELSE 0 END) AS future_payout,
+            MIN(sale.sale_date) AS earliest_sale_date,
+            MAX(sale.sale_date) AS latest_sale_date,
+            COALESCE(
+                MIN(CASE WHEN sale.payout_date > CURDATE() THEN sale.payout_date ELSE NULL END),
+                MAX(sale.payout_date)
+            ) AS next_payout_date
+        FROM (
+            SELECT
+                o.or_id,
+                o.u_id,
+                o.st_id,
+                st.st_number,
+                st.st_company_name,
+                st.omise_recipient_id,
+                b.bk_name,
+                st.bank_account_number,
+                DATE(COALESCE(pay.paid_at, o.created_at)) AS sale_date,
+                DATE_ADD(DATE(COALESCE(pay.paid_at, o.created_at)), INTERVAL ? DAY) AS payout_date,
+                COALESCE(item_summary.item_count, 0) AS item_count,
+                COALESCE(item_summary.item_gross_total, o.subtotal) + COALESCE(o.shipping_fee, 0) AS gross_sales,
+                COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0) AS discount_total,
+                COALESCE(refund.refund_total, 0) AS refund_total,
+                GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0) AS net_sales
+            FROM Orders o
+            LEFT JOIN Store st ON st.st_id = o.st_id
+            LEFT JOIN Bank b ON b.bk_id = st.bk_id
+            LEFT JOIN Status os ON os.s_id = o.s_id
+            LEFT JOIN (
+                SELECT
+                    or_id,
+                    COUNT(oi_id) AS item_count,
+                    SUM(unit_price * qty) AS item_gross_total,
+                    SUM(discount_amount * qty) AS item_discount_total
+                FROM Order_items
+                GROUP BY or_id
+            ) item_summary ON item_summary.or_id = o.or_id
+            LEFT JOIN (
+                SELECT
+                    po.or_id,
+                    MAX(p.paid_at) AS paid_at
+                FROM Payment_orders po
+                INNER JOIN Payments p ON p.pay_id = po.pay_id
+                WHERE p.payment_status = 'paid'
+                GROUP BY po.or_id
+            ) pay ON pay.or_id = o.or_id
+            LEFT JOIN (
+                SELECT or_id, SUM(amount) AS refund_total
+                FROM Refunds
+                WHERE status = 'succeeded'
+                GROUP BY or_id
+            ) refund ON refund.or_id = o.or_id
+            WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+                ${storeSql}
+                ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
+        ) sale
+        GROUP BY sale.st_id, sale.st_number, sale.st_company_name, sale.omise_recipient_id, sale.bk_name, sale.bank_account_number
+        HAVING pending_payout > 0
+        ORDER BY due_payout DESC, pending_payout DESC, next_payout_date ASC`,
+        params
+    );
+
+    const normalizedRows = rows.map((row) => ({
+        ...row,
+        st_id: Number(row.st_id ?? 0),
+        order_count: Number(row.order_count ?? 0),
+        buyer_count: Number(row.buyer_count ?? 0),
+        item_count: Number(row.item_count ?? 0),
+        gross_sales: Number(row.gross_sales ?? 0),
+        discount_total: Number(row.discount_total ?? 0),
+        refund_total: Number(row.refund_total ?? 0),
+        pending_payout: Number(row.pending_payout ?? 0),
+        due_payout: Number(row.due_payout ?? 0),
+        future_payout: Number(row.future_payout ?? 0),
+    }));
+
+    const summary = normalizedRows.reduce(
+        (total, row) => {
+            total.vendor_count += 1;
+            total.order_count += row.order_count;
+            total.buyer_count += row.buyer_count;
+            total.item_count += row.item_count;
+            total.gross_sales += row.gross_sales;
+            total.discount_total += row.discount_total;
+            total.refund_total += row.refund_total;
+            total.pending_payout += row.pending_payout;
+            total.due_payout += row.due_payout;
+            total.future_payout += row.future_payout;
+            return total;
+        },
+        {
+            vendor_count: 0,
+            order_count: 0,
+            buyer_count: 0,
+            item_count: 0,
+            gross_sales: 0,
+            discount_total: 0,
+            refund_total: 0,
+            pending_payout: 0,
+            due_payout: 0,
+            future_payout: 0,
+        }
+    );
+
+    return { setting, summary, rows: normalizedRows };
 }
 
 export async function adminGetOrderById(or_id: number, st_id: number): Promise<AdminOrderDetailDTO | null> {

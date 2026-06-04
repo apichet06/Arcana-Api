@@ -91,6 +91,95 @@ export const adminGetOrderSummary = asyncHandler(async (req, res) => {
     res.status(200).json({ data: summary });
 });
 
+export const adminGetSalesReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetSalesReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetSalesByProductReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetSalesByProductReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetSalesByCategoryReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetSalesByCategoryReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetSalesByBuyerReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetSalesByBuyerReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetSalesByVendorReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetSalesByVendorReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetPendingPayoutReport = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const report = await service.adminGetPendingPayoutReport(st_id, {
+        ...(start_date ? { start_date } : {}),
+        ...(end_date ? { end_date } : {}),
+    });
+    res.status(200).json({ data: report });
+});
+
+export const adminGetPayoutSetting = asyncHandler(async (_req, res) => {
+    const setting = await service.adminGetPayoutSetting();
+    res.status(200).json({ data: setting });
+});
+
+export const adminUpdatePayoutSetting = asyncHandler(async (req, res) => {
+    const payout_cycle_days = Number(req.body?.payout_cycle_days);
+    const setting = await service.adminUpdatePayoutSetting(payout_cycle_days);
+    res.status(200).json({ data: setting, message: "อัปเดตรอบจ่ายสำเร็จ" });
+});
+
 export const adminGetOrderById = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);

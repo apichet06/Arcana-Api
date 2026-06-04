@@ -27,7 +27,7 @@ async function generateUserCode(): Promise<string> {
 }
 export async function findByEmpLogin(e_email: string): Promise<empDTO | null> {
     const [rows] = await pool.query<(empDTO & RowDataPacket)[]>(
-        `SELECT a.*, b.st_company_name ,b.st_image FROM Employees a 
+        `SELECT a.*, b.st_company_name, b.st_image, b.is_platform_store FROM Employees a 
         INNER JOIN Store b ON a.st_id = b.st_id
         WHERE a.e_email = ?`, [e_email]);
     return rows[0] || null;
