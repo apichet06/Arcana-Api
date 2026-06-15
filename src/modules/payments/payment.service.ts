@@ -11,6 +11,8 @@ import {
     setOrdersStatus,
     type OrderStatusCode,
 } from "../orders/order-status.service.js";
+import { getIO } from "../../socket/socket.js";
+import * as notificationService from "../notifications/notification.service.js";
 import type {
     OmiseCardDTO,
     OmiseChargeInput,
@@ -26,10 +28,19 @@ type PayableOrderRow = RowDataPacket & {
     or_id: number;
     order_no: string;
     u_id: number;
+    st_id: number;
     status: string;
     status_code: string | null;
     grand_total: number;
     payment_expires_at: Date | string | null;
+};
+
+type PaymentOrderSocketRow = RowDataPacket & {
+    or_id: number;
+    order_no: string | null;
+    u_id: number;
+    st_id: number;
+    grand_total: number | null;
 };
 
 type SavedPaymentMethodRow = RowDataPacket & {
@@ -89,7 +100,7 @@ function omiseAuthHeader(): string {
     return `Basic ${Buffer.from(`${env.OMISE_SECRET_KEY}:`).toString("base64")}`;
 }
 
-async function omiseRequest<T>(path: string, init: RequestInit): Promise<T> {
+export async function omiseRequest<T>(path: string, init: RequestInit): Promise<T> {
     const res = await fetch(`https://api.omise.co${path}`, {
         ...init,
         headers: {
@@ -596,7 +607,7 @@ async function getPayableOrdersForUpdate(
     orderIds: number[]
 ): Promise<PayableOrderRow[]> {
     const [rows] = await conn.query<PayableOrderRow[]>(
-        `SELECT o.or_id, o.order_no, o.u_id, o.status, os.s_code AS status_code,
+        `SELECT o.or_id, o.order_no, o.u_id, o.st_id, o.status, os.s_code AS status_code,
                 o.grand_total, o.payment_expires_at
          FROM Orders o
          LEFT JOIN Status os ON os.s_id = o.s_id
@@ -626,6 +637,40 @@ async function getPayableOrdersForUpdate(
     }
 
     return rows;
+}
+
+function emitPaidOrderChanges(rows: PaymentOrderSocketRow[]) {
+    if (!rows.length) return;
+
+    try {
+        const io = getIO();
+        const orderIds = rows.map((row) => Number(row.or_id));
+        const userIds = [...new Set(rows.map((row) => Number(row.u_id)).filter(Boolean))];
+
+        for (const storeId of new Set(rows.map((row) => Number(row.st_id)).filter(Boolean))) {
+            io.to(`STORE_${storeId}`).emit("order:changed", {
+                event: "order:paid",
+                order_ids: orderIds,
+                status_code: "CONFIRMED",
+            });
+            io.to(`STORE_${storeId}`).emit("order:paid", {
+                event: "order:paid",
+                order_ids: orderIds,
+                status_code: "CONFIRMED",
+            });
+        }
+
+        for (const userId of userIds) {
+            io.to(`USER_${userId}`).emit("payment:confirmed", { order_ids: orderIds });
+            io.to(`USER_${userId}`).emit("order:changed", {
+                event: "order:paid",
+                order_ids: orderIds,
+                status_code: "CONFIRMED",
+            });
+        }
+    } catch {
+        // Socket อาจไม่ได้ init (เช่น ตอน test) — ไม่ต้อง throw เพราะ DB อัพเดทสำเร็จแล้ว
+    }
 }
 
 export async function chargeAndRecordPayment(
@@ -724,6 +769,177 @@ export async function chargeAndRecordPayment(
     };
 }
 
+/**
+ * handleChargeComplete — เรียกโดย Omise webhook เมื่อ charge เปลี่ยนสถานะเป็น successful หรือ failed
+ *
+ * ใช้สำหรับ PromptPay เป็นหลัก เพราะ card charge จะ resolve ทันทีตอนสร้าง
+ * ส่วน PromptPay ต้องรอลูกค้าสแกน QR ก่อน Omise จึงส่ง webhook กลับมาทีหลัง
+ *
+ * ฟังก์ชันนี้ออกแบบให้ idempotent: ถ้า payment อัพเดทไปแล้วจะ skip ทันที
+ */
+export async function handleChargeComplete(
+    chargeId: string,
+    chargeStatus: string,
+    chargePaid: boolean
+): Promise<void> {
+    // ตรวจสอบว่า charge สำเร็จหรือล้มเหลว — สถานะอื่น (เช่น pending) ยังไม่ต้องทำอะไร
+    const isSuccessful = chargePaid === true || chargeStatus === "successful";
+    const isFailed = chargeStatus === "failed";
+
+    if (!isSuccessful && !isFailed) return;
+
+    await ensureInventoryReservationTable();
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Lock payment record เพื่อป้องกัน race condition กรณี webhook ถูกส่งซ้ำ
+        // ดึง u_id ไว้ด้วยเพื่อใช้ emit socket หลัง commit
+        const [payRows] = await conn.query<(RowDataPacket & { pay_id: number; payment_status: string; u_id: number })[]>(
+            "SELECT pay_id, payment_status, u_id FROM Payments WHERE payment_ref = ? LIMIT 1 FOR UPDATE",
+            [chargeId]
+        );
+
+        // ตรวจ undefined โดยตรงเพื่อให้ TypeScript narrow type ได้ (length check ทำไม่ได้)
+        const payment = payRows[0];
+        if (!payment) {
+            // ไม่พบ payment ที่ผูกกับ charge นี้ — อาจเกิดจาก charge ถูกสร้างนอกระบบ
+            await conn.rollback();
+            return;
+        }
+
+        // Idempotent guard: ถ้าเคยอัพเดทแล้วไม่ต้องทำซ้ำ
+        if (payment.payment_status !== "pending") {
+            await conn.rollback();
+            return;
+        }
+
+        // อัพเดทสถานะ payment และบันทึกเวลาที่ชำระเงิน
+        await conn.query(
+            "UPDATE Payments SET payment_status = ?, paid_at = ? WHERE pay_id = ?",
+            [
+                isSuccessful ? "paid" : "failed",
+                isSuccessful ? new Date() : null,
+                payment.pay_id,
+            ]
+        );
+
+        let confirmedOrders: PaymentOrderSocketRow[] = [];
+
+        if (isSuccessful) {
+            // ดึง order IDs ทั้งหมดที่ผูกกับ payment นี้
+            const [orderRows] = await conn.query<PaymentOrderSocketRow[]>(
+                `SELECT o.or_id, o.order_no, o.u_id, o.st_id, o.grand_total
+                 FROM Payment_orders po
+                 INNER JOIN Orders o ON o.or_id = po.or_id
+                 WHERE po.pay_id = ?`,
+                [payment.pay_id]
+            );
+            confirmedOrders = orderRows;
+            const confirmedOrderIds = confirmedOrders.map((row) => Number(row.or_id));
+
+            if (confirmedOrderIds.length > 0) {
+                // ตัด stock และเปลี่ยนสถานะ order เป็น CONFIRMED เหมือนกับ card payment ที่สำเร็จทันที
+                await consumeReservationsForOrders(conn, confirmedOrderIds);
+                await setOrdersStatus(conn, confirmedOrderIds, "CONFIRMED");
+            }
+        }
+
+        await conn.commit();
+
+        // แจ้ง frontend ผ่าน Socket.IO หลัง commit สำเร็จแล้วเท่านั้น
+        // ส่งไปที่ห้อง USER_<id> เพื่อให้เฉพาะลูกค้าคนนั้นรับ event
+        if (isSuccessful && confirmedOrders.length > 0) {
+            emitPaidOrderChanges(confirmedOrders);
+
+            // บันทึก notification ลง DB ให้ร้านค้าและลูกค้าเห็นย้อนหลังได้
+            // (checkoutOrder ทำแล้วสำหรับ card payment — webhook path นี้ครอบคลุม PromptPay และ 3DS)
+            for (const order of confirmedOrders) {
+                const totalLabel = order.grand_total != null
+                    ? ` ยอด ${Number(order.grand_total).toLocaleString("th-TH")} บาท`
+                    : "";
+                const orderNo = order.order_no ?? String(order.or_id);
+                try {
+                    await notificationService.CreateNotification({
+                        target_type: "STORE",
+                        target_id: Number(order.st_id),
+                        type: "order:paid",
+                        title: "ชำระเงินสำเร็จ",
+                        message: `คำสั่งซื้อ ${orderNo} ชำระเงินแล้ว${totalLabel}`,
+                        action_url: `/dashboard/orders?order_id=${order.or_id}`,
+                        ref_type: "ORDER",
+                        ref_id: Number(order.or_id),
+                        priority: "HIGH",
+                    });
+                } catch (err) {
+                    console.warn(`[payments] store notification for order ${order.or_id} failed:`, err);
+                }
+            }
+        }
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function syncPromptPayChargeForOrder(uId: number, orderId: number): Promise<PaymentResultDTO> {
+    const [rows] = await pool.query<(RowDataPacket & {
+        pay_id: number;
+        payment_no: string;
+        payment_status: PaymentResultDTO["payment_status"];
+        payment_ref: string | null;
+        amount_total: number;
+    })[]>(
+        `SELECT p.pay_id, p.payment_no, p.payment_status, p.payment_ref, p.amount_total
+         FROM Payments p
+         INNER JOIN Payment_orders po ON po.pay_id = p.pay_id
+         INNER JOIN Orders o ON o.or_id = po.or_id
+         WHERE o.or_id = ?
+           AND o.u_id = ?
+           AND p.payment_method = 'omise_promptpay'
+         ORDER BY p.pay_id DESC
+         LIMIT 1`,
+        [orderId, uId]
+    );
+
+    const payment = rows[0];
+    if (!payment) throw new ApiError(404, "ไม่พบรายการชำระเงิน PromptPay ของคำสั่งซื้อนี้");
+
+    if (payment.payment_status === "pending" && payment.payment_ref) {
+        const charge = await omiseRequest<OmiseChargeResponse>(`/charges/${payment.payment_ref}`, {
+            method: "GET",
+        });
+        await handleChargeComplete(payment.payment_ref, charge.status ?? "", charge.paid === true);
+    }
+
+    const [updatedRows] = await pool.query<(RowDataPacket & {
+        pay_id: number;
+        payment_no: string;
+        payment_status: PaymentResultDTO["payment_status"];
+        payment_ref: string | null;
+        amount_total: number;
+    })[]>(
+        `SELECT p.pay_id, p.payment_no, p.payment_status, p.payment_ref, p.amount_total
+         FROM Payments p
+         WHERE p.pay_id = ?
+         LIMIT 1`,
+        [payment.pay_id]
+    );
+
+    const updated = updatedRows[0] ?? payment;
+    return {
+        pay_id: Number(updated.pay_id),
+        payment_no: updated.payment_no,
+        payment_status: updated.payment_status,
+        payment_ref: updated.payment_ref,
+        amount_total: Number(updated.amount_total),
+        order_ids: [orderId],
+    };
+}
+
 export async function chargeOrdersWithOmise(input: OmiseChargeInput): Promise<PaymentResultDTO> {
     await ensureInventoryReservationTable();
 
@@ -745,6 +961,9 @@ export async function chargeOrdersWithOmise(input: OmiseChargeInput): Promise<Pa
         });
 
         await conn.commit();
+        if (payment.payment_status === "paid") {
+            emitPaidOrderChanges(orders);
+        }
         return payment;
     } catch (err) {
         await conn.rollback();

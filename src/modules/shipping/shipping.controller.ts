@@ -1,6 +1,7 @@
 import { ApiError } from "../../shared/errors/ApiError.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import * as service from "./shipping.service.js";
+import { getShippopLabelHtml, withAutoPrint, withPrintStyles } from "./providers/shippop.js";
 import type { CalcType } from "./shipping.type.js";
 
 function parseId(value: unknown, label: string): number {
@@ -46,6 +47,8 @@ export const createCarrier = asyncHandler(async (req, res) => {
   const id = await service.createCarrier({
     sc_code: String(body.sc_code).trim(),
     sc_name: String(body.sc_name).trim(),
+    shippop_courier_code:
+      body.shippop_courier_code !== undefined ? String(body.shippop_courier_code).trim() || null : null,
     calc_type: calcType,
     vol_divisor:
       calcType === "CHARGEABLE_WEIGHT" && body.vol_divisor != null
@@ -66,6 +69,9 @@ export const updateCarrier = asyncHandler(async (req, res) => {
   await service.updateCarrier(scId, {
     ...(body.sc_code !== undefined ? { sc_code: String(body.sc_code).trim() } : {}),
     ...(body.sc_name !== undefined ? { sc_name: String(body.sc_name).trim() } : {}),
+    ...(body.shippop_courier_code !== undefined
+      ? { shippop_courier_code: String(body.shippop_courier_code).trim() || null }
+      : {}),
     ...(body.calc_type !== undefined ? { calc_type: parseCalcType(body.calc_type) } : {}),
     ...(body.vol_divisor !== undefined
       ? {
@@ -222,4 +228,22 @@ export const calculateShipping = asyncHandler(async (req, res) => {
   const data = await service.calculateShipping(input);
 
   res.status(200).json({ data });
+});
+
+export const openShippopLabel = asyncHandler(async (req, res) => {
+  const trackingCode = String(req.params.tracking_code ?? "").trim();
+  const size = String(req.query.size ?? "A6").trim();
+  const signature = String(req.query.sig ?? "").trim();
+  const autoPrint = String(req.query.print ?? "") === "1";
+
+  const labelHtml = await getShippopLabelHtml(trackingCode, size, signature);
+  const html = autoPrint ? withAutoPrint(labelHtml) : withPrintStyles(labelHtml);
+  res
+    .status(200)
+    .setHeader("Content-Type", "text/html; charset=utf-8")
+    .setHeader(
+      "Content-Security-Policy",
+      "default-src 'self' https: data:; img-src 'self' https: data:; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; script-src 'self' 'unsafe-inline';"
+    )
+    .send(html);
 });

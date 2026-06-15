@@ -13,7 +13,8 @@ export const list = asyncHandler(async (_req, res) => {
 
 export const listBylgCode = asyncHandler(async (_req, res) => {
     const { lg_code } = _req.params;
-    const data = await category.getCategoryByLgCode(lg_code as string);
+    const ctl_id = _req.query.ctl_id ? Number(_req.query.ctl_id) : undefined;
+    const data = await category.getCategoryByLgCode(lg_code as string, ctl_id);
     res.status(200).json({ data });
 });
 

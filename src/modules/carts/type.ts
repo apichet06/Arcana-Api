@@ -41,6 +41,7 @@ export type CartItemDetailDTO = {
     variant_label: string | null;
     image_url: string | null;
     p_id: number;
+    ctl_id: number;
     p_name: string | null;
     st_id: number;
     st_company_name: string | null;

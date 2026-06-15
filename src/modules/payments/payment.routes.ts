@@ -9,3 +9,4 @@ paymentRouter.post("/methods/omise-card", BuyerAuth, controller.addPaymentMethod
 paymentRouter.patch("/methods/:id/default", BuyerAuth, controller.setDefaultPaymentMethod);
 paymentRouter.delete("/methods/:id", BuyerAuth, controller.deletePaymentMethod);
 paymentRouter.post("/omise/charge", BuyerAuth, controller.chargeOmise);
+paymentRouter.post("/omise/orders/:orderId/sync", BuyerAuth, controller.syncPromptPayCharge);

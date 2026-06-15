@@ -11,6 +11,16 @@ import { deleteManyPhysicalFiles } from "../../shared/helper/deleteUploadFile.js
 
 const apiBaseUrl = process.env.API_BASE_URL ?? "";
 
+function parseFormBoolean(value: unknown, fallback: boolean): boolean {
+    if (value === undefined || value === null || value === "") return fallback;
+    if (typeof value === "boolean") return value;
+
+    const normalized = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off"].includes(normalized)) return false;
+    return fallback;
+}
+
 export const list = asyncHandler(async (_req, res) => {
     const { lg_code } = _req.params;
 
@@ -67,7 +77,7 @@ export const create = asyncHandler(async (req, res) => {
         ptag_id,
         ctl_id: Number(ctl_id),
         ps_id: Number(ps_id),
-        p_isActive: p_isActive ?? true,
+        p_isActive: parseFormBoolean(p_isActive, true),
         p_isAccept: storeId !== 1 ? false : true,
         p_preorder_delivery_days: Number(p_preorder_delivery_days) || 0,
         images,
@@ -112,7 +122,7 @@ export const update = asyncHandler(async (req, res) => {
 
     const data = {
         p_name, p_description: transformedDescription, c_id, b_id,
-        ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: p_isActive ?? true, p_isAccept, reason, p_isAcceptDate, p_isAcceptBy, p_preorder_delivery_days: Number(p_preorder_delivery_days) || 0
+        ptag_id, ctl_id, ps_id, e_id: emp_id, p_isActive: parseFormBoolean(p_isActive, true), p_isAccept, reason, p_isAcceptDate, p_isAcceptBy, p_preorder_delivery_days: Number(p_preorder_delivery_days) || 0
     };
 
 

@@ -24,6 +24,17 @@ export const chargeOmise = asyncHandler(async (req, res) => {
     res.status(200).json({ data: payment });
 });
 
+export const syncPromptPayCharge = asyncHandler(async (req, res) => {
+    const uId = req.userId;
+    const orderId = Number(req.params.orderId);
+
+    if (!uId) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
+    if (!orderId || isNaN(orderId)) throw new ApiError(400, "order id ไม่ถูกต้อง");
+
+    const payment = await service.syncPromptPayChargeForOrder(uId, orderId);
+    res.status(200).json({ data: payment });
+});
+
 export const listPaymentMethods = asyncHandler(async (req, res) => {
     const uId = req.userId;
     if (!uId) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");

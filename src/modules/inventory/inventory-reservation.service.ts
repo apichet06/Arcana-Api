@@ -206,3 +206,44 @@ export async function consumeReservationsForOrders(
         );
     }
 }
+
+// คืน stock จริงกลับเข้าคลังหลัง order ที่จ่ายเงินแล้วได้รับ refund สำเร็จ
+// ใช้ consumed ledger เป็นหลักเพื่อให้คืนได้ครั้งเดียวและไม่เพิ่ม stock ซ้ำหาก endpoint ถูกเรียกซ้ำ
+export async function restockConsumedReservationsForOrders(
+    conn: PoolConnection,
+    orderIds: number[]
+): Promise<void> {
+    if (orderIds.length === 0) return;
+
+    const [reservations] = await conn.query<(RowDataPacket & {
+        oir_id: number;
+        inv_id: number;
+        qty_consumed: number;
+    })[]>(
+        `SELECT oir_id, inv_id, qty_consumed
+         FROM Order_inventory_reservations
+         WHERE or_id IN (?) AND status = 'consumed'
+         ORDER BY oir_id ASC
+         FOR UPDATE`,
+        [orderIds]
+    );
+
+    for (const reservation of reservations) {
+        const restockQty = Number(reservation.qty_consumed);
+        if (restockQty <= 0) continue;
+
+        await conn.query(
+            `UPDATE Inventorys
+             SET on_hand = on_hand + ?
+             WHERE inv_id = ?`,
+            [restockQty, reservation.inv_id]
+        );
+    }
+
+    await conn.query(
+        `UPDATE Order_inventory_reservations
+         SET status = 'released', released_at = ?, updated_at = ?
+         WHERE or_id IN (?) AND status = 'consumed'`,
+        [new Date(), new Date(), orderIds]
+    );
+}

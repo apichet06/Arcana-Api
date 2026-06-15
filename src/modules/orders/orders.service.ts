@@ -1,20 +1,23 @@
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import crypto from "crypto";
 import { pool } from "../../db/pool.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
-import type { AdminOrderDTO, AdminOrderSummaryDTO, AdminPayoutSettingDTO, AdminPendingPayoutReportDTO, AdminPendingPayoutRowDTO, AdminSalesByBuyerReportDTO, AdminSalesByBuyerRowDTO, AdminSalesByCategoryReportDTO, AdminSalesByCategoryRowDTO, AdminSalesByProductReportDTO, AdminSalesByProductRowDTO, AdminSalesByVendorReportDTO, AdminSalesByVendorRowDTO, AdminSalesReportDTO, AdminSalesReportRowDTO, CheckoutOrderInput, CreateOrderInput, OrderDetailDTO, OrderDTO, OrderItemDTO, OrderShipmentDTO, OrderShipmentItemDTO } from "./type.js";
+import type { AdminOrderDTO, AdminOrderSummaryDTO, AdminPayoutHistoryDTO, AdminPayoutHistoryRowDTO, AdminPayoutSettingDTO, AdminPendingPayoutReportDTO, AdminPendingPayoutRowDTO, AdminSalesByBuyerReportDTO, AdminSalesByBuyerRowDTO, AdminSalesByCategoryReportDTO, AdminSalesByCategoryRowDTO, AdminSalesByProductReportDTO, AdminSalesByProductRowDTO, AdminSalesByVendorReportDTO, AdminSalesByVendorRowDTO, AdminSalesReportDTO, AdminSalesReportRowDTO, AdminToggleStorePayoutDTO, AdminTransferResultDTO, CheckoutOrderInput, CreateOrderInput, OrderDetailDTO, OrderDTO, OrderItemDTO, OrderShipmentDTO, OrderShipmentItemDTO, ShipmentEventDTO } from "./type.js";
 import * as couponService from "../coupons/coupon.service.js";
 import * as shippingService from "../shipping/shipping.service.js";
 import type { CalculateResult } from "../shipping/shipping.type.js";
-import { chargeAndRecordPayment } from "../payments/payment.service.js";
-import { createOmiseRefund } from "../payments/payment.service.js";
+import { chargeAndRecordPayment, createOmiseRefund, omiseRequest } from "../payments/payment.service.js";
 import type { PaymentResultDTO } from "../payments/payment.type.js";
-import { createShippopShipment } from "../shipping/providers/shippop.js";
+import { createShippopShipment, getShippopTracking, type ShippopTrackingState } from "../shipping/providers/shippop.js";
 import { getIO } from "../../socket/socket.js";
+import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
 import * as notificationService from "../notifications/notification.service.js";
+import * as chatService from "../chat/chat.service.js";
 import type { NotificationPriority } from "../notifications/type.js";
 import {
     ensureInventoryReservationTable,
     releaseReservationsForOrders,
+    restockConsumedReservationsForOrders,
     reserveInventoryForOrderItems,
     type InventoryReservationItem,
 } from "../inventory/inventory-reservation.service.js";
@@ -25,118 +28,33 @@ import {
     setOrdersStatus,
     toLegacyOrderStatus,
 } from "./order-status.service.js";
+import {
+    ensureOrderShipmentLabelColumn,
+    ensureOrderShipmentTables,
+    ensurePayoutHistoryTable,
+    ensurePayoutOrdersTable,
+    ensurePayoutSettingsTable,
+    ensureRefundImagesTable,
+    ensureRefundReturnTrackingColumn,
+    ensureStorePayoutEnabledColumn,
+} from "./orders.schema.js";
 
-const REFUND_REQUESTABLE_STATUS_CODES: OrderStatusCode[] = ["CONFIRMED", "PROCESSING", "PACKED"];
+const REFUND_REQUESTABLE_STATUS_CODES: OrderStatusCode[] = ["CONFIRMED", "PROCESSING", "PACKED", "DELIVERED"];
+const ORDER_RECEIVED_STATUS_CODES: OrderStatusCode[] = ["RECEIVED", "AUTO_RECEIVED", "REVIEWED"];
 const ADMIN_STATUS_TRANSITIONS: Record<string, OrderStatusCode> = {
     CONFIRMED: "PROCESSING",
     PROCESSING: "PACKED",
     PACKED: "READY_TO_SHIP",
 };
 
-let orderShipmentLabelColumnReady: Promise<void> | null = null;
-let orderShipmentTablesReady: Promise<void> | null = null;
-let payoutSettingsTableReady: Promise<void> | null = null;
+let autoReceiveJobStarted = false;
 
+// ปัดเศษจำนวนเงินให้เหลือ 2 ตำแหน่ง ใช้ตอนคำนวณยอด order/shipping/discount
 function roundMoney(value: number): number {
     return Math.round(value * 100) / 100;
 }
 
-async function ensureOrderShipmentLabelColumn(): Promise<void> {
-    orderShipmentLabelColumnReady ??= pool.query<(RowDataPacket & { column_name: string })[]>(
-        `SELECT COLUMN_NAME AS column_name
-         FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = 'Orders'
-           AND COLUMN_NAME = 'label_url'`
-    )
-        .then(async ([columns]) => {
-            if (columns.length === 0) {
-                // SHIPPOP ส่ง label URL กลับมาหลัง confirm; เก็บแยกจาก tracking_url เพื่อใช้พิมพ์ใบปะหน้ากล่องโดยตรง
-                await pool.query("ALTER TABLE Orders ADD COLUMN label_url TEXT NULL AFTER tracking_url");
-            }
-        })
-        .then(() => undefined);
-
-    return orderShipmentLabelColumnReady;
-}
-
-async function ensureOrderShipmentTables(): Promise<void> {
-    orderShipmentTablesReady ??= (async () => {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS Order_shipments (
-                os_id INT NOT NULL AUTO_INCREMENT,
-                or_id INT NOT NULL,
-                loc_id INT NOT NULL,
-                shipment_no VARCHAR(80) NOT NULL,
-                status VARCHAR(40) NOT NULL DEFAULT 'planned',
-                tracking_no VARCHAR(120) NULL,
-                tracking_url TEXT NULL,
-                label_url TEXT NULL,
-                sender_name VARCHAR(255) NOT NULL,
-                sender_phone VARCHAR(60) NULL,
-                sender_email VARCHAR(255) NULL,
-                sender_address TEXT NOT NULL,
-                sender_zip_code VARCHAR(20) NULL,
-                sender_province_name VARCHAR(255) NULL,
-                sender_district_name VARCHAR(255) NULL,
-                sender_subdistrict_name VARCHAR(255) NULL,
-                recipient_name VARCHAR(255) NOT NULL,
-                recipient_phone VARCHAR(60) NULL,
-                recipient_address TEXT NOT NULL,
-                recipient_zip_code VARCHAR(20) NULL,
-                recipient_province_name VARCHAR(255) NULL,
-                recipient_district_name VARCHAR(255) NULL,
-                recipient_subdistrict_name VARCHAR(255) NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (os_id),
-                UNIQUE KEY uq_order_shipments_order_location (or_id, loc_id),
-                KEY idx_order_shipments_order (or_id),
-                KEY idx_order_shipments_location (loc_id)
-            )
-        `);
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS Order_shipment_items (
-                osi_id INT NOT NULL AUTO_INCREMENT,
-                os_id INT NOT NULL,
-                or_id INT NOT NULL,
-                oi_id INT NOT NULL,
-                pv_id INT NOT NULL,
-                qty INT NOT NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (osi_id),
-                UNIQUE KEY uq_order_shipment_items_line (os_id, oi_id, pv_id),
-                KEY idx_order_shipment_items_order (or_id),
-                KEY idx_order_shipment_items_item (oi_id)
-            )
-        `);
-    })();
-
-    return orderShipmentTablesReady;
-}
-
-async function ensurePayoutSettingsTable(): Promise<void> {
-    payoutSettingsTableReady ??= pool.query(`
-        CREATE TABLE IF NOT EXISTS Payout_settings (
-            ps_id TINYINT NOT NULL,
-            payout_cycle_days INT NOT NULL DEFAULT 7,
-            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (ps_id)
-        )
-    `)
-        .then(async () => {
-            await pool.query(
-                `INSERT INTO Payout_settings (ps_id, payout_cycle_days)
-                 VALUES (1, 7)
-                 ON DUPLICATE KEY UPDATE ps_id = ps_id`
-            );
-        })
-        .then(() => undefined);
-
-    return payoutSettingsTableReady;
-}
-
+// จำกัดจำนวนวันรอบ payout ให้อยู่ในช่วงที่ระบบยอมรับ
 function normalizePayoutCycleDays(value: number): number {
     const days = Math.trunc(Number(value));
     if (!Number.isFinite(days) || days < 1 || days > 365) {
@@ -175,6 +93,7 @@ type CheckoutAddressRow = RowDataPacket & {
 };
 
 // สร้างเลข order รายวัน และ lock running ล่าสุดใน transaction เพื่อกันเลขซ้ำ
+// สร้างเลขคำสั่งซื้อไม่ซ้ำโดยอิงวันที่ปัจจุบันและ sequence รายวัน
 async function generateOrderNo(conn: PoolConnection): Promise<string> {
     const now = new Date();
     const yyyymmdd =
@@ -212,11 +131,13 @@ const orderSelectSql = `
         latest_refund.refund_id AS refund_id,
         latest_refund.amount AS refund_amount,
         latest_refund.remark AS refund_remark,
+        latest_refund.return_tracking AS return_tracking,
         latest_refund.updated_at AS refund_updated_at,
         latest_refund.status AS refund_status,
         o.subtotal,
         o.discount_total,
         o.shipping_fee,
+        o.provider_shipping_cost,
         o.shipping_sc_id,
         sc.sc_code AS shipping_carrier_code,
         sc.sc_name AS shipping_carrier_name,
@@ -253,7 +174,7 @@ const orderSelectSql = `
     LEFT JOIN Districts dist ON dist.id = lb.districts_id
     LEFT JOIN Subdistricts subdist ON subdist.id = lb.subdistricts_id
     LEFT JOIN (
-        SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.updated_at
+        SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.return_tracking, r1.updated_at
         FROM Refunds r1
         INNER JOIN (
             SELECT or_id, MAX(refund_id) AS refund_id
@@ -286,6 +207,7 @@ let expirationJobStarted = false;
 type AdminOrderDetailDTO = AdminOrderDTO & {
     items: OrderItemDTO[];
     shipments?: OrderShipmentDTO[];
+    refund_images?: string[];
 };
 
 type OrderNotificationEvent =
@@ -296,6 +218,8 @@ type OrderNotificationEvent =
     | "order:refund_requested"
     | "order:refund_approved"
     | "order:refund_rejected"
+    | "order:received"
+    | "order:auto_received"
     | "order:cancelled"
     | "order:payment_expired";
 
@@ -323,23 +247,31 @@ const statusLabelByCode: Record<string, string> = {
     PROCESSING: "กำลังเตรียมสินค้า",
     PACKED: "แพ็กสินค้าแล้ว",
     READY_TO_SHIP: "พร้อมจัดส่ง",
+    DELIVERED: "จัดส่งสำเร็จ",
+    RECEIVED: "ยืนยันรับสินค้าแล้ว",
+    AUTO_RECEIVED: "ระบบยืนยันรับสินค้าอัตโนมัติ",
+    REVIEWED: "ให้คะแนนแล้ว",
     CANCELLED: "ยกเลิก",
     REFUNDED: "คืนเงินแล้ว",
 };
 
+// คืน label สถานะ order โดยใช้ label จาก DB ก่อน แล้วค่อย fallback เป็นข้อความ default
 function getOrderStatusLabel(order: Partial<OrderDTO>) {
     const statusCode = order.status_code ?? "";
     return order.status_label || statusLabelByCode[statusCode] || statusCode || order.status || "-";
 }
 
+// สร้าง URL ไปหน้า order detail ฝั่งร้าน/backoffice
 function getStoreOrderActionUrl(order: Pick<OrderDTO, "or_id">) {
     return `/dashboard/orders?order_id=${order.or_id}`;
 }
 
+// สร้าง URL ไปหน้า order detail ฝั่ง buyer
 function getBuyerOrderActionUrl(order: Pick<OrderDTO, "or_id">) {
     return `/arcana/account/orders?order_id=${order.or_id}`;
 }
 
+// ประกอบ payload notification/socket สำหรับเหตุการณ์ของ order
 function buildOrderEventPayload(options: OrderNotificationOptions) {
     const { event, order, title, message, actor = "system" } = options;
 
@@ -365,6 +297,7 @@ function buildOrderEventPayload(options: OrderNotificationOptions) {
     };
 }
 
+// บันทึก notification ลง DB ให้เป้าหมายที่เกี่ยวข้อง เช่น buyer หรือร้านค้า
 async function createOrderNotification(target: OrderNotificationTarget, options: OrderNotificationOptions) {
     const { order, event, title, message, priority = "NORMAL" } = options;
     const targetId = target === "STORE" ? Number(order.st_id) : Number(order.u_id);
@@ -383,6 +316,7 @@ async function createOrderNotification(target: OrderNotificationTarget, options:
     });
 }
 
+// ส่ง notification และ emit socket เมื่อ order มีเหตุการณ์สำคัญ
 async function notifyOrderEvent(options: OrderNotificationOptions) {
     const targets = options.targets ?? ["STORE", "USER"];
     const payload = buildOrderEventPayload(options);
@@ -414,12 +348,14 @@ async function notifyOrderEvent(options: OrderNotificationOptions) {
     }
 }
 
+// ส่ง notification หลายรายการแบบเรียงลำดับ ใช้กับ batch job หรือหลาย order
 async function notifyManyOrderEvents(orders: OrderNotificationOptions[]) {
     for (const orderNotification of orders) {
         await notifyOrderEvent(orderNotification);
     }
 }
 
+// คำนวณเวลาหมดอายุการชำระเงินของ order pending
 function buildPaymentExpiresAt(): Date {
     const minutes = Number.isFinite(PAYMENT_EXPIRE_MINUTES) && PAYMENT_EXPIRE_MINUTES > 0
         ? PAYMENT_EXPIRE_MINUTES
@@ -427,6 +363,7 @@ function buildPaymentExpiresAt(): Date {
     return new Date(Date.now() + minutes * 60 * 1000);
 }
 
+// ดึงรายการสินค้าใน order หลายรายการ แล้วจัดกลุ่มตาม or_id
 async function getOrderItems(orIds: number[], lg_code = "th"): Promise<Map<number, OrderItemDTO[]>> {
     const itemMap = new Map<number, OrderItemDTO[]>();
     if (!orIds.length) return itemMap;
@@ -444,6 +381,7 @@ async function getOrderItems(orIds: number[], lg_code = "th"): Promise<Map<numbe
     return itemMap;
 }
 
+// สร้างกลุ่ม shipment เริ่มต้นให้ order ตามร้าน/สินค้า เพื่อเตรียมข้อมูลจัดส่ง
 async function createShipmentGroupsForOrders(conn: PoolConnection, orderIds: number[]): Promise<void> {
     if (!orderIds.length) return;
     await ensureOrderShipmentTables();
@@ -608,6 +546,239 @@ async function createShipmentGroupsForOrders(conn: PoolConnection, orderIds: num
     }
 }
 
+// แยก tracking code จาก tracking_no หรือ tracking_url ของ SHIPPOP
+function getShippopTrackingCodesFromShipment(shipment: Pick<OrderShipmentDTO, "tracking_no" | "tracking_url">): string[] {
+    const codes: string[] = [];
+    const trackingUrl = shipment.tracking_url?.trim();
+    if (trackingUrl) {
+        try {
+            const parsed = new URL(trackingUrl);
+            const code = parsed.searchParams.get("tracking_code")?.trim();
+            if (code) codes.push(code);
+        } catch {
+            const match = trackingUrl.match(/[?&]tracking_code=([^&]+)/);
+            if (match?.[1]) codes.push(decodeURIComponent(match[1]));
+        }
+    }
+
+    const trackingNo = shipment.tracking_no?.trim();
+    if (trackingNo) codes.push(trackingNo);
+
+    return [...new Set(codes.map((code) => code.trim()).filter(Boolean))];
+}
+
+// แปลง description จากขนส่งให้เป็น title สั้นสำหรับแสดงใน timeline
+function shipmentEventTitle(description: string) {
+    const parts = description.split(",").map((part) => part.trim()).filter(Boolean);
+    return parts.length > 1 ? parts[parts.length - 1] : description;
+}
+
+// แยกรายละเอียดเสริมจาก description ของขนส่ง ถ้ามีหลายส่วน
+function shipmentEventDescription(description: string) {
+    const parts = description.split(",").map((part) => part.trim()).filter(Boolean);
+    return parts.length > 1 ? parts[0] : null;
+}
+
+// สร้าง hash กันบันทึก shipment event ซ้ำจากข้อมูล tracking เดิม
+function eventHash(osId: number, state: ShippopTrackingState) {
+    return crypto
+        .createHash("sha256")
+        .update([osId, state.status ?? "", state.datetime, state.location ?? "", state.description].join("|"))
+        .digest("hex");
+}
+
+// map สถานะจาก SHIPPOP ให้เป็น shipment_status ภายในระบบ
+function mapShippopShipmentStatus(orderStatus: string | null, states: ShippopTrackingState[]): string | null {
+    const latestState = [...states].sort((a, b) => new Date(b.datetime).getTime() - new Date(a.datetime).getTime())[0];
+    const latestCode = latestState?.status?.toUpperCase() ?? "";
+    const latestDescription = latestState?.description.toLowerCase() ?? "";
+    const normalizedOrderStatus = orderStatus?.toLowerCase() ?? "";
+
+    if (normalizedOrderStatus === "complete" || latestCode === "POD" || latestDescription.includes("delivery successfully")) {
+        return "delivered";
+    }
+    if (["wait", "unpaid", "booking", "paid"].includes(normalizedOrderStatus)) return "label_created";
+    if (latestCode === "045" || latestDescription.includes("out for delivery")) return "out_for_delivery";
+    if (latestCode === "010" || latestDescription.includes("picked up")) return "picked_up";
+    if (normalizedOrderStatus === "shipping" || states.length > 0) return "in_transit";
+
+    return null;
+}
+
+// sync tracking event จาก SHIPPOP และอัปเดต shipment/order เป็น delivered เมื่อขนส่งส่งสำเร็จ
+async function syncShipmentEventsFromShippop(orderIds: number[]): Promise<Map<number, string>> {
+    const syncedStatuses = new Map<number, string>();
+    if (!orderIds.length || process.env.SHIPPOP_TRACKING_SYNC_ON_READ === "false") return syncedStatuses;
+    await ensureOrderShipmentTables();
+
+    const [shipments] = await pool.query<(RowDataPacket & Pick<OrderShipmentDTO, "os_id" | "or_id" | "tracking_no" | "tracking_url">)[]>(
+        `SELECT os_id, or_id, tracking_no, tracking_url
+         FROM Order_shipments
+         WHERE or_id IN (?)
+           AND (tracking_no IS NOT NULL OR tracking_url IS NOT NULL)
+         ORDER BY os_id ASC`,
+        [orderIds]
+    );
+
+    for (const shipment of shipments) {
+        const trackingCodes = getShippopTrackingCodesFromShipment(shipment);
+        if (!trackingCodes.length) continue;
+
+        for (const trackingCode of trackingCodes) {
+            try {
+                const tracking = await getShippopTracking(trackingCode);
+                const mappedStatus = mapShippopShipmentStatus(tracking.orderStatus, tracking.states);
+
+                for (const state of tracking.states) {
+                    const occurredAt = new Date(state.datetime);
+                    if (Number.isNaN(occurredAt.getTime())) continue;
+
+                    await pool.query(
+                        `INSERT INTO Order_shipment_events
+                         (os_id, or_id, tracking_code, courier_tracking_code, status, title, description, location, occurred_at, raw_json, event_hash)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE
+                           tracking_code = VALUES(tracking_code),
+                           courier_tracking_code = VALUES(courier_tracking_code),
+                           title = VALUES(title),
+                           description = VALUES(description),
+                           location = VALUES(location),
+                           raw_json = VALUES(raw_json),
+                           updated_at = CURRENT_TIMESTAMP`,
+                        [
+                            Number(shipment.os_id),
+                            Number(shipment.or_id),
+                            tracking.trackingCode,
+                            tracking.courierTrackingCode,
+                            state.status,
+                            shipmentEventTitle(state.description),
+                            shipmentEventDescription(state.description),
+                            state.location,
+                            occurredAt,
+                            JSON.stringify(state.raw ?? null),
+                            eventHash(Number(shipment.os_id), state),
+                        ]
+                    );
+                }
+
+                if (mappedStatus) {
+                    const orderId = Number(shipment.or_id);
+                    syncedStatuses.set(orderId, mappedStatus);
+
+                    await pool.query(
+                        `UPDATE Order_shipments
+                         SET status = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE os_id = ?`,
+                        [mappedStatus, shipment.os_id]
+                    );
+
+                    await pool.query(
+                        `UPDATE Orders
+                         SET shipment_status = ?, update_at = CURRENT_TIMESTAMP
+                         WHERE or_id = ?
+                           AND (shipment_status IS NULL OR shipment_status != 'delivered')`,
+                        [mappedStatus, shipment.or_id]
+                    );
+
+                    if (mappedStatus === "delivered") {
+                        await pool.query(
+                            `UPDATE Orders o
+                             LEFT JOIN Status os ON os.s_id = o.s_id
+                             LEFT JOIN Status delivered_status ON delivered_status.s_code = 'DELIVERED'
+                             SET o.s_id = COALESCE(delivered_status.s_id, o.s_id),
+                                 o.status = 'delivered',
+                                 o.update_at = CURRENT_TIMESTAMP
+                             WHERE o.or_id = ?
+                               AND (os.s_code IS NULL OR os.s_code NOT IN ('CANCELLED', 'REFUNDED', 'RETURN_REQUESTED', 'RETURN_REQUESTED_COMPLETED', 'RECEIVED', 'AUTO_RECEIVED', 'REVIEWED'))`,
+                            [shipment.or_id]
+                        );
+                    }
+                }
+            } catch (error) {
+                console.warn("[orders] sync SHIPPOP tracking failed:", {
+                    os_id: shipment.os_id,
+                    tracking_code: trackingCode,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+    }
+
+    return syncedStatuses;
+}
+
+// ดึง event tracking ของ order หลายรายการ แล้วจัดกลุ่มตาม or_id
+async function getShipmentEvents(orderIds: number[]): Promise<Map<number, ShipmentEventDTO[]>> {
+    await ensureOrderShipmentTables();
+
+    const eventMap = new Map<number, ShipmentEventDTO[]>();
+    if (!orderIds.length) return eventMap;
+
+    const [rows] = await pool.query<(RowDataPacket & ShipmentEventDTO & { or_id: number })[]>(
+        `SELECT
+            ose.or_id,
+            ose.status,
+            ose.title,
+            ose.description,
+            ose.location,
+            ose.occurred_at
+         FROM Order_shipment_events ose
+         INNER JOIN (
+            SELECT or_id, MAX(os_id) AS os_id
+            FROM Order_shipments
+            WHERE or_id IN (?)
+            GROUP BY or_id
+         ) latest_shipment ON latest_shipment.os_id = ose.os_id
+         INNER JOIN Order_shipments os ON os.os_id = latest_shipment.os_id
+         WHERE ose.or_id IN (?)
+           AND (
+                os.tracking_no IS NULL
+                OR ose.tracking_code = os.tracking_no
+                OR ose.courier_tracking_code = os.tracking_no
+                OR (ose.tracking_code IS NOT NULL AND os.tracking_url LIKE CONCAT('%', ose.tracking_code, '%'))
+                OR (ose.courier_tracking_code IS NOT NULL AND os.tracking_url LIKE CONCAT('%', ose.courier_tracking_code, '%'))
+           )
+         ORDER BY ose.occurred_at DESC, ose.ose_id DESC`,
+        [orderIds, orderIds]
+    );
+
+    for (const row of rows) {
+        const orderId = Number(row.or_id);
+        eventMap.set(orderId, [
+            ...(eventMap.get(orderId) ?? []),
+            {
+                status: row.status ?? null,
+                title: row.title,
+                description: row.description ?? null,
+                location: row.location ?? null,
+                occurred_at: String(row.occurred_at),
+            },
+        ]);
+    }
+
+    return eventMap;
+}
+
+// ดึงชื่อสถานะตามภาษา ใช้เติม status_label ใน response
+async function getStatusLangName(statusCode: string, lgCode: string): Promise<string | null> {
+    const [rows] = await pool.query<(RowDataPacket & { s_name: string | null })[]>(
+        `SELECT sl.s_name
+         FROM Status s
+         LEFT JOIN StatusLangs sl ON sl.s_id = s.s_id AND sl.lg_code = ?
+         WHERE s.s_code = ?
+         LIMIT 1`,
+        [lgCode, statusCode]
+    );
+
+    return rows[0]?.s_name ?? null;
+}
+
+// เช็ค flag สำหรับเปิด action จำลอง shipment ใน dev เท่านั้น
+function allowDevShipmentActions() {
+    return process.env.ALLOW_DEV_SHIPMENT_ACTIONS === "true";
+}
+
+// ดึงข้อมูล shipment และ shipment items ของ order หลายรายการ
 async function getOrderShipments(orderIds: number[]): Promise<Map<number, OrderShipmentDTO[]>> {
     await ensureOrderShipmentTables();
 
@@ -686,6 +857,7 @@ async function getOrderShipments(orderIds: number[]): Promise<Map<number, OrderS
     return shipmentMap;
 }
 
+// คืน usage ของ coupon เมื่อ order ถูกยกเลิกและเคยใช้คูปองไว้
 async function restoreCouponUsageForCancelledOrder(conn: PoolConnection, order: OrderDTO): Promise<void> {
     if (!order.co_id) return;
 
@@ -712,6 +884,7 @@ async function restoreCouponUsageForCancelledOrder(conn: PoolConnection, order: 
     );
 }
 
+// หา cart ที่ active ของ buyer เพื่อใช้สร้าง order จากตะกร้า
 async function getActiveCartId(conn: PoolConnection, uId: number): Promise<number> {
     const [cartRows] = await conn.query<(RowDataPacket & { cart_id: number })[]>(
         "SELECT cart_id FROM Carts WHERE u_id = ? AND status = 'active' ORDER BY cart_id DESC LIMIT 1",
@@ -722,6 +895,7 @@ async function getActiveCartId(conn: PoolConnection, uId: number): Promise<numbe
     return cart.cart_id;
 }
 
+// ดึงสินค้าใน cart พร้อมข้อมูล variant/product/store สำหรับ checkout
 async function getCheckoutCartItems(conn: PoolConnection, cartId: number): Promise<CheckoutCartItemRow[]> {
     const [cartItems] = await conn.query<CheckoutCartItemRow[]>(
         `SELECT
@@ -765,6 +939,7 @@ async function getCheckoutCartItems(conn: PoolConnection, cartId: number): Promi
     return cartItems;
 }
 
+// ดึงที่อยู่จัดส่งของ buyer สำหรับใช้สร้าง order และคำนวณขนส่ง
 async function getCheckoutAddress(conn: PoolConnection, uId: number, locbId: number): Promise<CheckoutAddressRow> {
     const [locRows] = await conn.query<CheckoutAddressRow[]>(
         `SELECT
@@ -788,6 +963,7 @@ async function getCheckoutAddress(conn: PoolConnection, uId: number, locbId: num
     return loc;
 }
 
+// ตรวจว่าคูปองเป็นของร้านใด เพื่อกันใช้คูปองข้ามร้านใน checkout หลายร้าน
 async function getCouponStoreId(conn: PoolConnection, coCode: string): Promise<number> {
     const [rows] = await conn.query<(RowDataPacket & { st_id: number })[]>(
         "SELECT st_id FROM Coupon WHERE co_code = ? LIMIT 1",
@@ -798,6 +974,7 @@ async function getCouponStoreId(conn: PoolConnection, coCode: string): Promise<n
     return Number(coupon.st_id);
 }
 
+// แยกสินค้าใน cart ตามร้าน เพราะระบบสร้าง order แยกต่อร้าน
 function groupCartItemsByStore(items: CheckoutCartItemRow[]): Map<number, CheckoutCartItemRow[]> {
     const groups = new Map<number, CheckoutCartItemRow[]>();
     for (const item of items) {
@@ -808,31 +985,38 @@ function groupCartItemsByStore(items: CheckoutCartItemRow[]): Map<number, Checko
     return groups;
 }
 
+// รวมขนาด/น้ำหนักสินค้าในร้านเป็น package เดียวสำหรับขอราคา shipping
 function buildShippingPackage(items: CheckoutCartItemRow[]) {
     const weightG = items.reduce((sum, item) => {
-        return sum + Math.max(Number(item.weight_g ?? 0), 0) * Number(item.qty);
+        return sum + positiveShipmentNumber(item.weight_g, "น้ำหนัก", item.p_name ?? String(item.pv_id)) * Number(item.qty);
     }, 0);
 
     const volumeCm3 = items.reduce((sum, item) => {
-        const length = Number(item.length_cm ?? 0);
-        const width = Number(item.width_cm ?? 0);
-        const height = Number(item.height_cm ?? 0);
-        const itemVolume = length > 0 && width > 0 && height > 0 ? length * width * height : 0;
+        const productName = item.p_name ?? String(item.pv_id);
+        const length = positiveShipmentNumber(item.length_cm, "ความยาว", productName);
+        const width = positiveShipmentNumber(item.width_cm, "ความกว้าง", productName);
+        const height = positiveShipmentNumber(item.height_cm, "ความสูง", productName);
+        const itemVolume = length * width * height;
         return sum + itemVolume * Number(item.qty);
     }, 0);
 
     return {
-        weight_g: Math.max(Math.ceil(weightG), 1),
-        volume_cm3: volumeCm3 > 0 ? Math.ceil(volumeCm3) : undefined,
+        weight_g: Math.ceil(weightG),
+        volume_cm3: Math.ceil(volumeCm3),
     };
 }
 
 type CheckoutShippingQuoteGroup = {
     loc_id: number;
     origin_postcode: string;
+    origin_address: string | null;
+    origin_province_name: string | null;
+    origin_district_name: string | null;
+    origin_subdistrict_name: string | null;
     items: CheckoutCartItemRow[];
 };
 
+// สร้างชุด quote ขนส่งของแต่ละร้านใน checkout โดยอิงที่อยู่ buyer และ location ร้าน
 async function buildCheckoutShippingQuoteGroups(
     conn: PoolConnection,
     items: CheckoutCartItemRow[]
@@ -848,15 +1032,26 @@ async function buildCheckoutShippingQuoteGroups(
             on_hand: number;
             reserved_qty: number;
             origin_postcode: string | null;
+            origin_address: string | null;
+            origin_province_name: string | null;
+            origin_district_name: string | null;
+            origin_subdistrict_name: string | null;
         })[]>(
             `SELECT
                 inv.inv_id,
                 inv.loc_id,
                 inv.on_hand,
                 inv.reserved_qty,
-                loc.zip_code AS origin_postcode
+                loc.loc_address AS origin_address,
+                loc.zip_code AS origin_postcode,
+                prov.name_in_thai AS origin_province_name,
+                dist.name_in_thai AS origin_district_name,
+                subdist.name_in_thai AS origin_subdistrict_name
              FROM Inventorys inv
              LEFT JOIN Locations loc ON loc.loc_id = inv.loc_id
+             LEFT JOIN Provinces prov ON prov.id = loc.Provinces_id
+             LEFT JOIN Districts dist ON dist.id = loc.Districts_id
+             LEFT JOIN Subdistricts subdist ON subdist.id = loc.Subdistricts_id
              WHERE inv.pv_id = ?
              ORDER BY inv.inv_id ASC`,
             [item.pv_id]
@@ -876,6 +1071,10 @@ async function buildCheckoutShippingQuoteGroups(
             const group = groups.get(Number(row.loc_id)) ?? {
                 loc_id: Number(row.loc_id),
                 origin_postcode: row.origin_postcode,
+                origin_address: row.origin_address,
+                origin_province_name: row.origin_province_name,
+                origin_district_name: row.origin_district_name,
+                origin_subdistrict_name: row.origin_subdistrict_name,
                 items: [],
             };
 
@@ -893,9 +1092,10 @@ async function buildCheckoutShippingQuoteGroups(
     return Array.from(groups.values());
 }
 
+// คำนวณตัวเลือกขนส่งที่ใช้ได้สำหรับตะกร้าปัจจุบัน
 async function calculateCheckoutShippingOptions(
     conn: PoolConnection,
-    loc: Pick<CheckoutAddressRow, "zip_code">,
+    loc: Pick<CheckoutAddressRow, "zip_code" | "locb_address" | "province_name" | "district_name" | "subdistrict_name">,
     items: CheckoutCartItemRow[]
 ): Promise<CalculateResult[]> {
     const quoteGroups = await buildCheckoutShippingQuoteGroups(conn, items);
@@ -905,6 +1105,14 @@ async function calculateCheckoutShippingOptions(
             return shippingService.calculateShipping({
                 postcode: loc.zip_code,
                 origin_postcode: group.origin_postcode,
+                origin_address: group.origin_address,
+                origin_province: group.origin_province_name,
+                origin_district: group.origin_district_name,
+                origin_subdistrict: group.origin_subdistrict_name,
+                destination_address: loc.locb_address,
+                destination_province: loc.province_name,
+                destination_district: loc.district_name,
+                destination_subdistrict: loc.subdistrict_name,
                 weight_g: shippingPackage.weight_g,
                 ...(shippingPackage.volume_cm3 !== undefined ? { volume_cm3: shippingPackage.volume_cm3 } : {}),
             });
@@ -915,6 +1123,7 @@ async function calculateCheckoutShippingOptions(
     return mergeStoreShippingOptions(groupOptions);
 }
 
+// รวมตัวเลือกขนส่งจากหลายร้านให้เหลือรายการที่ carrier/zone ใช้ร่วมกันได้
 function mergeStoreShippingOptions(storeOptions: CalculateResult[][]): CalculateResult[] {
     if (!storeOptions.length) return [];
 
@@ -938,6 +1147,7 @@ function mergeStoreShippingOptions(storeOptions: CalculateResult[][]): Calculate
         .filter((option) => option.is_active);
 }
 
+// เลือก shipping option ตามที่ buyer ส่งมา หรือ fallback เป็นตัวเลือกแรก
 function pickShippingOption(options: CalculateResult[], shippingScId?: number | null): CalculateResult {
     const availableOptions = options.filter((option) => option.price != null);
     if (!availableOptions.length) {
@@ -955,6 +1165,7 @@ function pickShippingOption(options: CalculateResult[], shippingScId?: number | 
     return selected ?? availableOptions.sort((a, b) => Number(a.price) - Number(b.price))[0]!;
 }
 
+// คืนตัวเลือกขนส่งที่ buyer เลือกได้ก่อน checkout
 export async function getCheckoutShippingOptions(input: {
     u_id: number;
     locb_id: number;
@@ -978,6 +1189,7 @@ export async function getCheckoutShippingOptions(input: {
     }
 }
 
+// สร้าง order จาก cart โดยยังไม่ charge เงิน ใช้กับ flow แยกจ่ายภายหลัง
 export async function createOrder(input: CreateOrderInput): Promise<OrderDetailDTO[]> {
     await ensureInventoryReservationTable();
     await ensureOrderShipmentLabelColumn();
@@ -1010,6 +1222,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderDetailD
             const shippingOptions = await calculateCheckoutShippingOptions(conn, loc, storeItems);
             const shippingOption = pickShippingOption(shippingOptions, input.shipping_sc_id);
             const shippingFee = Number(shippingOption.price ?? 0);
+            const providerShippingCost = shippingOption.provider_price == null ? null : Number(shippingOption.provider_price);
 
             const couponResult = input.co_code && couponStoreId === storeId
                 ? await couponService.validateCouponForCheckout(conn, {
@@ -1036,6 +1249,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderDetailD
                     subtotal,
                     discount_total: discountTotal,
                     shipping_fee: shippingFee,
+                    provider_shipping_cost: providerShippingCost,
                     // Snapshot carrier choice on the order; without this we cannot reliably show
                     // which shipping provider the buyer selected after checkout.
                     shipping_sc_id: shippingOption.sc_id,
@@ -1151,6 +1365,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderDetailD
     }
 }
 
+// checkout แบบครบวงจร: สร้าง order, reserve stock, ใช้คูปอง และสร้าง payment
 export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders: OrderDetailDTO[]; payment: PaymentResultDTO }> {
     await ensureInventoryReservationTable();
     await ensureOrderShipmentLabelColumn();
@@ -1181,6 +1396,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
             const shippingOptions = await calculateCheckoutShippingOptions(conn, loc, storeItems);
             const shippingOption = pickShippingOption(shippingOptions, input.shipping_sc_id);
             const shippingFee = Number(shippingOption.price ?? 0);
+            const providerShippingCost = shippingOption.provider_price == null ? null : Number(shippingOption.provider_price);
 
             const couponResult = input.co_code && couponStoreId === storeId
                 ? await couponService.validateCouponForCheckout(conn, {
@@ -1207,6 +1423,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
                     subtotal,
                     discount_total: discountTotal,
                     shipping_fee: shippingFee,
+                    provider_shipping_cost: providerShippingCost,
                     // Snapshot carrier choice on the order; without this we cannot reliably show
                     // which shipping provider the buyer selected after checkout.
                     shipping_sc_id: shippingOption.sc_id,
@@ -1351,6 +1568,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
     }
 }
 
+// ดึงรายการ order ของ buyer พร้อม items และ shipment events สำหรับหน้า "การซื้อของฉัน"
 export async function getOrders(u_id: number, lg_code = "th"): Promise<(OrderDTO & { item_count: number; items: OrderItemDTO[] })[]> {
     await ensureOrderShipmentLabelColumn();
 
@@ -1362,9 +1580,11 @@ export async function getOrders(u_id: number, lg_code = "th"): Promise<(OrderDTO
             latest_refund.refund_id AS refund_id,
             latest_refund.amount AS refund_amount,
             latest_refund.remark AS refund_remark,
+            latest_refund.return_tracking AS return_tracking,
             latest_refund.updated_at AS refund_updated_at,
             latest_refund.status AS refund_status,
             o.subtotal, o.discount_total, o.shipping_fee,
+            o.provider_shipping_cost,
             o.shipping_sc_id,
             sc.sc_code AS shipping_carrier_code,
             sc.sc_name AS shipping_carrier_name,
@@ -1396,7 +1616,7 @@ export async function getOrders(u_id: number, lg_code = "th"): Promise<(OrderDTO
         LEFT JOIN Districts dist ON dist.id = lb.districts_id
         LEFT JOIN Subdistricts subdist ON subdist.id = lb.subdistricts_id
         LEFT JOIN (
-            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.updated_at
+            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.return_tracking, r1.updated_at
             FROM Refunds r1
             INNER JOIN (
                 SELECT or_id, MAX(refund_id) AS refund_id
@@ -1410,14 +1630,36 @@ export async function getOrders(u_id: number, lg_code = "th"): Promise<(OrderDTO
         ORDER BY o.created_at DESC`,
         [lg_code, u_id]
     );
-    const itemMap = await getOrderItems(rows.map((order) => Number(order.or_id)), lg_code);
-    return rows.map((order) => ({
-        ...order,
-        items: itemMap.get(Number(order.or_id)) ?? [],
-    }));
+    const orderIds = rows.map((order) => Number(order.or_id));
+    let syncedStatuses = new Map<number, string>();
+    if (process.env.SHIPPOP_TRACKING_SYNC_ON_LIST === "true") {
+        syncedStatuses = await syncShipmentEventsFromShippop(orderIds);
+    }
+    const [itemMap, eventMap] = await Promise.all([
+        getOrderItems(orderIds, lg_code),
+        getShipmentEvents(orderIds),
+    ]);
+    const deliveredStatusLabel = [...syncedStatuses.values()].includes("delivered")
+        ? await getStatusLangName("DELIVERED", lg_code)
+        : null;
+    return rows.map((order) => {
+        const syncedStatus = syncedStatuses.get(Number(order.or_id));
+        const orderStatusCode = order.status_code as OrderStatusCode | null;
+        const shouldApplyDeliveredSync = syncedStatus === "delivered" && !ORDER_RECEIVED_STATUS_CODES.includes(orderStatusCode as OrderStatusCode);
+        return {
+            ...order,
+            status: shouldApplyDeliveredSync ? "delivered" : order.status,
+            status_code: (shouldApplyDeliveredSync ? "DELIVERED" : order.status_code ?? null) as string | null,
+            status_label: (shouldApplyDeliveredSync ? deliveredStatusLabel : order.status_label ?? null) as string | null,
+            shipment_status: (syncedStatus ?? order.shipment_status ?? null) as string | null,
+            items: itemMap.get(Number(order.or_id)) ?? [],
+            shipment_events: eventMap.get(Number(order.or_id)) ?? [],
+        };
+    });
 }
 
-export async function adminGetOrders(st_id: number): Promise<AdminOrderDTO[]> {
+// ดึงรายการ order ฝั่งร้าน/backoffice ตามร้านที่ login อยู่
+export async function adminGetOrders(st_id: number, lg_code = "th"): Promise<AdminOrderDTO[]> {
     await ensureOrderShipmentLabelColumn();
 
     const params: number[] = [];
@@ -1433,9 +1675,11 @@ export async function adminGetOrders(st_id: number): Promise<AdminOrderDTO[]> {
             latest_refund.refund_id AS refund_id,
             latest_refund.amount AS refund_amount,
             latest_refund.remark AS refund_remark,
+            latest_refund.return_tracking AS return_tracking,
             latest_refund.updated_at AS refund_updated_at,
             latest_refund.status AS refund_status,
             o.subtotal, o.discount_total, o.shipping_fee,
+            o.provider_shipping_cost,
             o.shipping_sc_id,
             sc.sc_code AS shipping_carrier_code,
             sc.sc_name AS shipping_carrier_name,
@@ -1457,9 +1701,9 @@ export async function adminGetOrders(st_id: number): Promise<AdminOrderDTO[]> {
         LEFT JOIN Store s ON s.st_id = o.st_id
         LEFT JOIN Shipping_carriers sc ON sc.sc_id = o.shipping_sc_id
         LEFT JOIN Status os ON os.s_id = o.s_id
-        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = 'th'
+        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = ?
         LEFT JOIN (
-            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.updated_at
+            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.return_tracking, r1.updated_at
             FROM Refunds r1
             INNER JOIN (
                 SELECT or_id, MAX(refund_id) AS refund_id
@@ -1480,12 +1724,13 @@ export async function adminGetOrders(st_id: number): Promise<AdminOrderDTO[]> {
         ${storeSql}
         GROUP BY o.or_id
         ORDER BY o.created_at DESC`,
-        params
+        [lg_code, ...params]
     );
 
     return rows;
 }
 
+// สรุปยอด order หน้า dashboard ร้าน เช่น ยอดขายวันนี้และจำนวน order ตามสถานะ
 export async function adminGetOrderSummary(st_id: number): Promise<AdminOrderSummaryDTO> {
     const params: number[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "WHERE st_id = ?";
@@ -1520,21 +1765,24 @@ export async function adminGetOrderSummary(st_id: number): Promise<AdminOrderSum
     };
 }
 
+// รายงานยอดขายรวมตามช่วงวันที่ของร้าน ใช้ดูภาพรวมราย order
 export async function adminGetSalesReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminSalesReportDTO> {
+    await ensureOrderShipmentTables();
+
     const params: (number | string)[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -1547,11 +1795,12 @@ export async function adminGetSalesReport(
             COALESCE(NULLIF(u.u_username, ''), o.shipping_name, CONCAT('Customer #', o.u_id)) AS customer_name,
             os.s_code AS status_code,
             osl.s_name AS status_label,
-            COALESCE(pay.paid_at, o.created_at) AS sale_date,
+            o.update_at AS sale_date,
             COALESCE(item_summary.item_count, 0) AS item_count,
             COALESCE(item_summary.item_gross_total, o.subtotal) AS subtotal,
             COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0) AS discount_total,
             o.shipping_fee,
+            o.provider_shipping_cost,
             o.grand_total,
             COALESCE(refund.refund_total, 0) AS refund_total,
             GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0) AS net_sales,
@@ -1583,19 +1832,28 @@ export async function adminGetSalesReport(
             GROUP BY po.or_id
         ) pay ON pay.or_id = o.or_id
         LEFT JOIN (
+            SELECT
+                or_id,
+                MAX(occurred_at) AS delivered_at
+            FROM Order_shipment_events
+            WHERE status = 'POD'
+               OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+            GROUP BY or_id
+        ) delivered_event ON delivered_event.or_id = o.or_id
+        LEFT JOIN (
             SELECT or_id, SUM(amount) AS refund_total
             FROM Refunds
             WHERE status = 'succeeded'
             GROUP BY or_id
         ) refund ON refund.or_id = o.or_id
-        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+        WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
             ${storeSql}
             ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         GROUP BY
             o.or_id, o.order_no, o.st_id, st.st_company_name, customer_name,
             os.s_code, osl.s_name, sale_date, item_summary.item_count,
             item_summary.item_gross_total, item_summary.item_discount_total, o.subtotal, o.discount_total,
-            o.shipping_fee, o.grand_total, refund.refund_total,
+            o.shipping_fee, o.provider_shipping_cost, o.grand_total, refund.refund_total,
             pay.payment_method, pay.payment_status
         ORDER BY sale_date DESC, o.or_id DESC`,
         params
@@ -1643,21 +1901,24 @@ export async function adminGetSalesReport(
     };
 }
 
+// รายงานยอดขายแยกตามสินค้าและ variant
 export async function adminGetSalesByProductReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminSalesByProductReportDTO> {
+    await ensureOrderShipmentTables();
+
     const params: (number | string)[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -1670,12 +1931,21 @@ export async function adminGetSalesByProductReport(
             oi.variant_name,
             p.st_id,
             st.st_company_name,
-            COUNT(DISTINCT o.or_id) AS order_count,
-            SUM(oi.qty) AS qty_sold,
-            SUM(oi.unit_price * oi.qty) AS gross_sales,
-            SUM(oi.discount_amount * oi.qty) AS discount_total,
-            SUM(oi.line_total) AS net_sales,
-            CASE WHEN SUM(oi.qty) > 0 THEN SUM(oi.line_total) / SUM(oi.qty) ELSE 0 END AS average_unit_price
+            COUNT(DISTINCT CASE
+                WHEN GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0) > 0
+                  OR GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0) > 0
+                THEN o.or_id
+                ELSE NULL
+            END) AS order_count,
+            SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS qty_sold,
+            SUM(oi.unit_price * GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS gross_sales,
+            SUM(oi.discount_amount * GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS discount_total,
+            SUM(GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0)) AS net_sales,
+            CASE
+                WHEN SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) > 0
+                THEN SUM(GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0)) / SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0))
+                ELSE 0
+            END AS average_unit_price
         FROM Order_items oi
         INNER JOIN Orders o ON o.or_id = oi.or_id
         INNER JOIN Status os ON os.s_id = o.s_id
@@ -1683,18 +1953,31 @@ export async function adminGetSalesByProductReport(
         LEFT JOIN ProductLangs pl ON pl.p_id = oi.p_id AND pl.lg_code = 'th'
         LEFT JOIN Store st ON st.st_id = p.st_id
         LEFT JOIN (
-            SELECT po.or_id, MAX(paid.paid_at) AS paid_at
-            FROM Payment_orders po
-            INNER JOIN Payments paid ON paid.pay_id = po.pay_id
-            WHERE paid.payment_status = 'paid'
-            GROUP BY po.or_id
-        ) pay ON pay.or_id = o.or_id
-        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP')
+            SELECT
+                ri.oi_id,
+                SUM(ri.qty) AS refund_qty,
+                SUM(ri.amount) AS refund_amount
+            FROM Refund_items ri
+            INNER JOIN Refunds r ON r.refund_id = ri.refund_id
+            WHERE r.status = 'succeeded'
+            GROUP BY ri.oi_id
+        ) refund_item ON refund_item.oi_id = oi.oi_id
+        LEFT JOIN (
+            SELECT
+                or_id,
+                MAX(occurred_at) AS delivered_at
+            FROM Order_shipment_events
+            WHERE status = 'POD'
+               OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+            GROUP BY or_id
+        ) delivered_event ON delivered_event.or_id = o.or_id
+        WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
             ${storeSql}
             ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         GROUP BY
             oi.p_id, oi.pv_id, oi.sku, product_name, oi.variant_name,
             p.st_id, st.st_company_name
+        HAVING qty_sold > 0 OR net_sales > 0
         ORDER BY net_sales DESC, qty_sold DESC`,
         params
     );
@@ -1736,21 +2019,24 @@ export async function adminGetSalesByProductReport(
     return { summary, rows: normalizedRows };
 }
 
+// รายงานยอดขายแยกตามหมวดหมู่สินค้า
 export async function adminGetSalesByCategoryReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminSalesByCategoryReportDTO> {
+    await ensureOrderShipmentTables();
+
     const params: (number | string)[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -1759,13 +2045,27 @@ export async function adminGetSalesByCategoryReport(
             COALESCE(c.c_id, 0) AS c_id,
             COALESCE(cl.cl_name, 'ไม่พบหมวดหมู่') AS category_name,
             ctl.ctl_name AS catalog_name,
-            COUNT(DISTINCT o.or_id) AS order_count,
-            COUNT(DISTINCT oi.p_id) AS product_count,
-            SUM(oi.qty) AS qty_sold,
-            SUM(oi.unit_price * oi.qty) AS gross_sales,
-            SUM(oi.discount_amount * oi.qty) AS discount_total,
-            SUM(oi.line_total) AS net_sales,
-            CASE WHEN SUM(oi.qty) > 0 THEN SUM(oi.line_total) / SUM(oi.qty) ELSE 0 END AS average_unit_price
+            COUNT(DISTINCT CASE
+                WHEN GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0) > 0
+                  OR GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0) > 0
+                THEN o.or_id
+                ELSE NULL
+            END) AS order_count,
+            COUNT(DISTINCT CASE
+                WHEN GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0) > 0
+                  OR GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0) > 0
+                THEN oi.p_id
+                ELSE NULL
+            END) AS product_count,
+            SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS qty_sold,
+            SUM(oi.unit_price * GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS gross_sales,
+            SUM(oi.discount_amount * GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) AS discount_total,
+            SUM(GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0)) AS net_sales,
+            CASE
+                WHEN SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0)) > 0
+                THEN SUM(GREATEST(oi.line_total - COALESCE(refund_item.refund_amount, 0), 0)) / SUM(GREATEST(oi.qty - COALESCE(refund_item.refund_qty, 0), 0))
+                ELSE 0
+            END AS average_unit_price
         FROM Order_items oi
         INNER JOIN Orders o ON o.or_id = oi.or_id
         INNER JOIN Status os ON os.s_id = o.s_id
@@ -1774,16 +2074,29 @@ export async function adminGetSalesByCategoryReport(
         LEFT JOIN CategoryLangs cl ON cl.c_id = c.c_id AND cl.lg_code = 'th'
         LEFT JOIN Catalog ctl ON ctl.ctl_id = c.ctl_id
         LEFT JOIN (
-            SELECT po.or_id, MAX(paid.paid_at) AS paid_at
-            FROM Payment_orders po
-            INNER JOIN Payments paid ON paid.pay_id = po.pay_id
-            WHERE paid.payment_status = 'paid'
-            GROUP BY po.or_id
-        ) pay ON pay.or_id = o.or_id
-        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP')
+            SELECT
+                ri.oi_id,
+                SUM(ri.qty) AS refund_qty,
+                SUM(ri.amount) AS refund_amount
+            FROM Refund_items ri
+            INNER JOIN Refunds r ON r.refund_id = ri.refund_id
+            WHERE r.status = 'succeeded'
+            GROUP BY ri.oi_id
+        ) refund_item ON refund_item.oi_id = oi.oi_id
+        LEFT JOIN (
+            SELECT
+                or_id,
+                MAX(occurred_at) AS delivered_at
+            FROM Order_shipment_events
+            WHERE status = 'POD'
+               OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+            GROUP BY or_id
+        ) delivered_event ON delivered_event.or_id = o.or_id
+        WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
             ${storeSql}
             ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         GROUP BY c_id, category_name, catalog_name
+        HAVING qty_sold > 0 OR net_sales > 0
         ORDER BY net_sales DESC, qty_sold DESC`,
         params
     );
@@ -1826,21 +2139,24 @@ export async function adminGetSalesByCategoryReport(
     return { summary, rows: normalizedRows };
 }
 
+// รายงานยอดขายแยกตามลูกค้า ใช้ดู buyer ที่ซื้อเยอะหรือซื้อบ่อย
 export async function adminGetSalesByBuyerReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminSalesByBuyerReportDTO> {
+    await ensureOrderShipmentTables();
+
     const params: (number | string)[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -1861,7 +2177,7 @@ export async function adminGetSalesByBuyerReport(
                 THEN SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) / COUNT(DISTINCT o.or_id)
                 ELSE 0
             END AS average_order_value,
-            MAX(COALESCE(pay.paid_at, o.created_at)) AS latest_sale_date
+            MAX(o.update_at) AS latest_sale_date
         FROM Orders o
         LEFT JOIN Users u ON u.u_id = o.u_id
         LEFT JOIN Store st ON st.st_id = o.st_id
@@ -1885,12 +2201,21 @@ export async function adminGetSalesByBuyerReport(
             GROUP BY po.or_id
         ) pay ON pay.or_id = o.or_id
         LEFT JOIN (
+            SELECT
+                or_id,
+                MAX(occurred_at) AS delivered_at
+            FROM Order_shipment_events
+            WHERE status = 'POD'
+               OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+            GROUP BY or_id
+        ) delivered_event ON delivered_event.or_id = o.or_id
+        LEFT JOIN (
             SELECT or_id, SUM(amount) AS refund_total
             FROM Refunds
             WHERE status = 'succeeded'
             GROUP BY or_id
         ) refund ON refund.or_id = o.or_id
-        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+        WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
             ${storeSql}
             ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         GROUP BY o.u_id, customer_name, o.st_id, st.st_company_name
@@ -1948,21 +2273,24 @@ export async function adminGetSalesByBuyerReport(
     return { summary, rows: normalizedRows };
 }
 
+// รายงานยอดขายแยกตามร้าน/vendor สำหรับมุมมอง admin รวมทุกร้าน
 export async function adminGetSalesByVendorReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminSalesByVendorReportDTO> {
+    await ensureOrderShipmentTables();
+
     const params: (number | string)[] = [];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -1983,7 +2311,7 @@ export async function adminGetSalesByVendorReport(
                 THEN SUM(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0)) / COUNT(DISTINCT o.or_id)
                 ELSE 0
             END AS average_order_value,
-            MAX(COALESCE(pay.paid_at, o.created_at)) AS latest_sale_date
+            MAX(o.update_at) AS latest_sale_date
         FROM Orders o
         LEFT JOIN Store st ON st.st_id = o.st_id
         LEFT JOIN Status os ON os.s_id = o.s_id
@@ -2006,12 +2334,21 @@ export async function adminGetSalesByVendorReport(
             GROUP BY po.or_id
         ) pay ON pay.or_id = o.or_id
         LEFT JOIN (
+            SELECT
+                or_id,
+                MAX(occurred_at) AS delivered_at
+            FROM Order_shipment_events
+            WHERE status = 'POD'
+               OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+            GROUP BY or_id
+        ) delivered_event ON delivered_event.or_id = o.or_id
+        LEFT JOIN (
             SELECT or_id, SUM(amount) AS refund_total
             FROM Refunds
             WHERE status = 'succeeded'
             GROUP BY or_id
         ) refund ON refund.or_id = o.or_id
-        WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+        WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
             ${storeSql}
             ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         GROUP BY o.st_id, st.st_number, st.st_company_name
@@ -2062,6 +2399,7 @@ export async function adminGetSalesByVendorReport(
     return { summary, rows: normalizedRows };
 }
 
+// ดึงค่าตั้งค่ารอบจ่ายเงินให้ร้าน เช่น จำนวนวันหลังรับสินค้า
 export async function adminGetPayoutSetting(): Promise<AdminPayoutSettingDTO> {
     await ensurePayoutSettingsTable();
 
@@ -2075,6 +2413,7 @@ export async function adminGetPayoutSetting(): Promise<AdminPayoutSettingDTO> {
     };
 }
 
+// อัปเดตจำนวนวันรอบ payout ที่ใช้คำนวณรายการครบกำหนดจ่าย
 export async function adminUpdatePayoutSetting(payout_cycle_days: number): Promise<AdminPayoutSettingDTO> {
     await ensurePayoutSettingsTable();
     const days = normalizePayoutCycleDays(payout_cycle_days);
@@ -2089,10 +2428,247 @@ export async function adminUpdatePayoutSetting(payout_cycle_days: number): Promi
     return adminGetPayoutSetting();
 }
 
+// สร้าง Omise transfer ให้ร้านจาก order ที่ครบเงื่อนไข payout และยังไม่เคยโอน
+export async function adminExecuteTransfer(st_id: number): Promise<AdminTransferResultDTO> {
+    await Promise.all([
+        ensureOrderShipmentTables(),
+        ensurePayoutHistoryTable(),
+        ensurePayoutOrdersTable(),
+        ensureStorePayoutEnabledColumn(),
+    ]);
+
+    const [[storeRow]] = await pool.query<(RowDataPacket & { st_company_name: string | null; omise_recipient_id: string | null; payout_enabled: number; payout_cycle_days: number })[]>(
+        `SELECT st.st_company_name, st.omise_recipient_id, COALESCE(st.payout_enabled, 1) AS payout_enabled,
+                COALESCE(ps.payout_cycle_days, 7) AS payout_cycle_days
+         FROM Store st
+         LEFT JOIN Payout_settings ps ON ps.ps_id = 1
+         WHERE st.st_id = ? LIMIT 1`,
+        [st_id]
+    );
+    if (!storeRow) throw new ApiError(404, "ไม่พบข้อมูลร้านค้า");
+    if (!storeRow.omise_recipient_id) throw new ApiError(400, "ร้านค้านี้ยังไม่มี Omise Recipient ID");
+    if (!storeRow.payout_enabled) throw new ApiError(400, "ร้านค้านี้ถูกปิดการจ่ายเงินไว้");
+
+    // ดึง orders ที่ครบกำหนดจ่ายและยังไม่เคย payout
+    const [dueOrders] = await pool.query<(RowDataPacket & { or_id: number; net_amount_satang: number })[]>(
+        `SELECT o.or_id,
+                ROUND(GREATEST(o.grand_total - COALESCE(refund.refund_total, 0), 0) * 100) AS net_amount_satang
+         FROM Orders o
+         LEFT JOIN Status os ON os.s_id = o.s_id
+         LEFT JOIN (
+             SELECT
+                 or_id,
+                 MAX(occurred_at) AS delivered_at
+             FROM Order_shipment_events
+             WHERE status = 'POD'
+                OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+             GROUP BY or_id
+         ) delivered_event ON delivered_event.or_id = o.or_id
+         LEFT JOIN (
+             SELECT or_id, SUM(amount) AS refund_total
+             FROM Refunds WHERE status = 'succeeded'
+             GROUP BY or_id
+         ) refund ON refund.or_id = o.or_id
+         WHERE o.st_id = ?
+           AND os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
+           AND DATE_ADD(DATE(o.update_at), INTERVAL ? DAY) <= CURDATE()
+           AND o.or_id NOT IN (SELECT or_id FROM Payout_orders)`,
+        [st_id, storeRow.payout_cycle_days]
+    );
+
+    if (dueOrders.length === 0) throw new ApiError(400, "ไม่มียอดที่ครบกำหนดจ่าย หรือทุก order ถูก payout ไปแล้ว");
+
+    const totalSatang = dueOrders.reduce((sum, row) => sum + Number(row.net_amount_satang), 0);
+    if (totalSatang < 100) throw new ApiError(400, "ยอดรวมน้อยกว่า 1 บาท ไม่สามารถโอนได้");
+
+    const omiseBody = new URLSearchParams();
+    omiseBody.set("amount", String(Math.trunc(totalSatang)));
+    omiseBody.set("recipient", storeRow.omise_recipient_id);
+
+    const transfer = await omiseRequest<{ id: string; amount: number; currency: string }>(
+        "/transfers",
+        { method: "POST", body: omiseBody as unknown as BodyInit }
+    );
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [historyResult] = await conn.query<ResultSetHeader>(
+            `INSERT INTO Payout_history (st_id, st_company_name, omise_transfer_id, omise_recipient_id, amount, currency)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [st_id, storeRow.st_company_name, transfer.id, storeRow.omise_recipient_id, Math.trunc(totalSatang), transfer.currency ?? "THB"]
+        );
+        const ph_id = historyResult.insertId;
+
+        await conn.query(
+            `INSERT INTO Payout_orders (ph_id, or_id, net_amount) VALUES ?`,
+            [dueOrders.map((o) => [ph_id, o.or_id, Math.trunc(o.net_amount_satang)])]
+        );
+
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+
+    try {
+        getIO().emit("payout:transfer_status_changed", {
+            omise_transfer_id: transfer.id,
+            status: "pending",
+        });
+    } catch {
+        // socket optional
+    }
+
+    return {
+        st_id,
+        st_company_name: storeRow.st_company_name,
+        omise_transfer_id: transfer.id,
+        amount: transfer.amount,
+        currency: transfer.currency ?? "THB",
+    };
+}
+
+// สรุป badge payout เช่น จำนวนร้านที่มียอดครบกำหนดและจำนวน transfer ตามสถานะ
+export async function adminGetPayoutBadgeSummary(): Promise<import("./type.js").AdminPayoutBadgeSummaryDTO> {
+    await Promise.all([ensureOrderShipmentTables(), ensurePayoutHistoryTable(), ensurePayoutOrdersTable(), ensureStorePayoutEnabledColumn()]);
+    const setting = await adminGetPayoutSetting();
+
+    const [[dueRow]] = await pool.query<(RowDataPacket & { due_count: number })[]>(
+        `SELECT COUNT(DISTINCT o.st_id) AS due_count
+         FROM Orders o
+         INNER JOIN Status os ON os.s_id = o.s_id AND os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
+         LEFT JOIN (
+             SELECT
+                 or_id,
+                 MAX(occurred_at) AS delivered_at
+             FROM Order_shipment_events
+             WHERE status = 'POD'
+                OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+             GROUP BY or_id
+         ) delivered_event ON delivered_event.or_id = o.or_id
+         WHERE DATE_ADD(DATE(o.update_at), INTERVAL ? DAY) <= CURDATE()
+           AND o.or_id NOT IN (SELECT or_id FROM Payout_orders)`,
+        [setting.payout_cycle_days]
+    );
+
+    const [statusRows] = await pool.query<(RowDataPacket & { status: string; cnt: number })[]>(
+        `SELECT status, COUNT(*) AS cnt FROM Payout_history GROUP BY status`
+    );
+    const statusMap: Record<string, number> = {};
+    for (const r of statusRows) statusMap[r.status] = Number(r.cnt);
+
+    return {
+        due_stores: Number(dueRow?.due_count ?? 0),
+        pending_transfers: statusMap["pending"] ?? 0,
+        sent_transfers: statusMap["sent"] ?? 0,
+        paid_transfers: statusMap["paid"] ?? 0,
+        failed_transfers: statusMap["failed"] ?? 0,
+    };
+}
+
+// เปิดหรือปิดการจ่ายเงินให้ร้านรายร้าน
+export async function adminToggleStorePayout(st_id: number, enabled: boolean): Promise<AdminToggleStorePayoutDTO> {
+    await ensureStorePayoutEnabledColumn();
+
+    const [result] = await pool.query<ResultSetHeader>(
+        "UPDATE Store SET payout_enabled = ? WHERE st_id = ?",
+        [enabled ? 1 : 0, st_id]
+    );
+    if (result.affectedRows === 0) throw new ApiError(404, "ไม่พบข้อมูลร้านค้า");
+
+    return { st_id, payout_enabled: enabled };
+}
+
+// ดึงประวัติ payout พร้อม filter ร้าน สถานะ วันที่ และ pagination
+export async function adminGetPayoutHistory(filters: {
+    st_id?: number;
+    status?: string;
+    start_date?: string;
+    end_date?: string;
+    page?: number;
+    page_size?: number;
+} = {}): Promise<AdminPayoutHistoryDTO> {
+    await ensurePayoutHistoryTable();
+
+    const page = Math.max(1, filters.page ?? 1);
+    const pageSize = Math.min(100, Math.max(1, filters.page_size ?? 20));
+    const offset = (page - 1) * pageSize;
+
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (filters.st_id) { conditions.push("st_id = ?"); params.push(filters.st_id); }
+    if (filters.status) { conditions.push("status = ?"); params.push(filters.status); }
+    if (filters.start_date) { conditions.push("DATE(created_at) >= ?"); params.push(filters.start_date); }
+    if (filters.end_date) { conditions.push("DATE(created_at) <= ?"); params.push(filters.end_date); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const [[countRow]] = await pool.query<(RowDataPacket & { total: number })[]>(
+        `SELECT COUNT(*) AS total FROM Payout_history ${where}`,
+        params
+    );
+    const total = Number(countRow?.total ?? 0);
+
+    const [rows] = await pool.query<(RowDataPacket & AdminPayoutHistoryRowDTO)[]>(
+        `SELECT ph_id, st_id, st_company_name, omise_transfer_id, omise_recipient_id,
+                amount, currency, status, created_at, updated_at
+         FROM Payout_history ${where}
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...params, pageSize, offset]
+    );
+
+    return { rows, total, page, page_size: pageSize };
+}
+
+// ดึง transfer ล่าสุดของแต่ละร้านเพื่อแสดงสถานะ payout ปัจจุบัน
+export async function adminGetLatestTransferPerStore(): Promise<Record<number, AdminPayoutHistoryRowDTO>> {
+    await ensurePayoutHistoryTable();
+
+    const [rows] = await pool.query<(RowDataPacket & AdminPayoutHistoryRowDTO)[]>(
+        `SELECT ph.ph_id, ph.st_id, ph.st_company_name, ph.omise_transfer_id,
+                ph.omise_recipient_id, ph.amount, ph.currency, ph.status,
+                ph.created_at, ph.updated_at
+         FROM Payout_history ph
+         INNER JOIN (
+             SELECT st_id, MAX(ph_id) AS max_id FROM Payout_history GROUP BY st_id
+         ) latest ON latest.st_id = ph.st_id AND latest.max_id = ph.ph_id`
+    );
+
+    return Object.fromEntries(rows.map((row) => [row.st_id, row]));
+}
+
+// อัปเดตสถานะ transfer จาก webhook/Omise และ emit ให้หน้า dashboard refresh
+export async function updatePayoutTransferStatus(omise_transfer_id: string, status: string): Promise<void> {
+    await ensurePayoutHistoryTable();
+    const [result] = await pool.query<ResultSetHeader>(
+        "UPDATE Payout_history SET status = ?, updated_at = NOW() WHERE omise_transfer_id = ?",
+        [status, omise_transfer_id]
+    );
+
+    if (result.affectedRows > 0) {
+        try {
+            getIO().emit("payout:transfer_status_changed", {
+                omise_transfer_id,
+                status,
+            });
+        } catch (error) {
+            console.warn("[payout] emit transfer status changed failed:", error);
+        }
+    }
+}
+
+// รายงาน order ที่รอ payout หรือครบกำหนด payout ตามรอบจ่ายเงิน
 export async function adminGetPendingPayoutReport(
     st_id: number,
     filters: { start_date?: string; end_date?: string } = {}
 ): Promise<AdminPendingPayoutReportDTO> {
+    await Promise.all([ensureOrderShipmentTables(), ensureStorePayoutEnabledColumn(), ensurePayoutOrdersTable()]);
     const setting = await adminGetPayoutSetting();
     const params: (number | string)[] = [setting.payout_cycle_days];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
@@ -2100,11 +2676,11 @@ export async function adminGetPendingPayoutReport(
 
     const dateSql: string[] = [];
     if (filters.start_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) >= ?");
+        dateSql.push("DATE(o.update_at) >= ?");
         params.push(filters.start_date);
     }
     if (filters.end_date) {
-        dateSql.push("DATE(COALESCE(pay.paid_at, o.created_at)) <= ?");
+        dateSql.push("DATE(o.update_at) <= ?");
         params.push(filters.end_date);
     }
 
@@ -2114,6 +2690,7 @@ export async function adminGetPendingPayoutReport(
             sale.st_number,
             sale.st_company_name,
             sale.omise_recipient_id,
+            sale.payout_enabled,
             sale.bk_name,
             sale.bank_account_number,
             COUNT(DISTINCT sale.or_id) AS order_count,
@@ -2139,10 +2716,11 @@ export async function adminGetPendingPayoutReport(
                 st.st_number,
                 st.st_company_name,
                 st.omise_recipient_id,
+                COALESCE(st.payout_enabled, 1) AS payout_enabled,
                 b.bk_name,
                 st.bank_account_number,
-                DATE(COALESCE(pay.paid_at, o.created_at)) AS sale_date,
-                DATE_ADD(DATE(COALESCE(pay.paid_at, o.created_at)), INTERVAL ? DAY) AS payout_date,
+                DATE(o.update_at) AS sale_date,
+                DATE_ADD(DATE(o.update_at), INTERVAL ? DAY) AS payout_date,
                 COALESCE(item_summary.item_count, 0) AS item_count,
                 COALESCE(item_summary.item_gross_total, o.subtotal) + COALESCE(o.shipping_fee, 0) AS gross_sales,
                 COALESCE(o.discount_total, 0) + COALESCE(item_summary.item_discount_total, 0) AS discount_total,
@@ -2163,24 +2741,25 @@ export async function adminGetPendingPayoutReport(
             ) item_summary ON item_summary.or_id = o.or_id
             LEFT JOIN (
                 SELECT
-                    po.or_id,
-                    MAX(p.paid_at) AS paid_at
-                FROM Payment_orders po
-                INNER JOIN Payments p ON p.pay_id = po.pay_id
-                WHERE p.payment_status = 'paid'
-                GROUP BY po.or_id
-            ) pay ON pay.or_id = o.or_id
+                    or_id,
+                    MAX(occurred_at) AS delivered_at
+                FROM Order_shipment_events
+                WHERE status = 'POD'
+                   OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+                GROUP BY or_id
+            ) delivered_event ON delivered_event.or_id = o.or_id
             LEFT JOIN (
                 SELECT or_id, SUM(amount) AS refund_total
                 FROM Refunds
                 WHERE status = 'succeeded'
                 GROUP BY or_id
             ) refund ON refund.or_id = o.or_id
-            WHERE os.s_code IN ('CONFIRMED', 'PROCESSING', 'PACKED', 'READY_TO_SHIP', 'REFUNDED')
+            WHERE os.s_code IN ('RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
+                AND o.or_id NOT IN (SELECT or_id FROM Payout_orders)
                 ${storeSql}
                 ${dateSql.length ? `AND ${dateSql.join(" AND ")}` : ""}
         ) sale
-        GROUP BY sale.st_id, sale.st_number, sale.st_company_name, sale.omise_recipient_id, sale.bk_name, sale.bank_account_number
+        GROUP BY sale.st_id, sale.st_number, sale.st_company_name, sale.omise_recipient_id, sale.payout_enabled, sale.bk_name, sale.bank_account_number
         HAVING pending_payout > 0
         ORDER BY due_payout DESC, pending_payout DESC, next_payout_date ASC`,
         params
@@ -2231,7 +2810,8 @@ export async function adminGetPendingPayoutReport(
     return { setting, summary, rows: normalizedRows };
 }
 
-export async function adminGetOrderById(or_id: number, st_id: number): Promise<AdminOrderDetailDTO | null> {
+// ดึงรายละเอียด order ฝั่งร้าน รวม items, shipment และรูปหลักฐานคืนเงิน
+export async function adminGetOrderById(or_id: number, st_id: number, lg_code = "th"): Promise<AdminOrderDetailDTO | null> {
     await ensureOrderShipmentLabelColumn();
     await ensureOrderShipmentTables();
 
@@ -2247,9 +2827,11 @@ export async function adminGetOrderById(or_id: number, st_id: number): Promise<A
             latest_refund.refund_id AS refund_id,
             latest_refund.amount AS refund_amount,
             latest_refund.remark AS refund_remark,
+            latest_refund.return_tracking AS return_tracking,
             latest_refund.updated_at AS refund_updated_at,
             latest_refund.status AS refund_status,
             o.subtotal, o.discount_total, o.shipping_fee,
+            o.provider_shipping_cost,
             o.shipping_sc_id,
             sc.sc_code AS shipping_carrier_code,
             sc.sc_name AS shipping_carrier_name,
@@ -2271,9 +2853,9 @@ export async function adminGetOrderById(or_id: number, st_id: number): Promise<A
         LEFT JOIN Store s ON s.st_id = o.st_id
         LEFT JOIN Shipping_carriers sc ON sc.sc_id = o.shipping_sc_id
         LEFT JOIN Status os ON os.s_id = o.s_id
-        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = 'th'
+        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = ?
         LEFT JOIN (
-            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.updated_at
+            SELECT r1.or_id, r1.refund_id, r1.amount, r1.status, r1.remark, r1.return_tracking, r1.updated_at
             FROM Refunds r1
             INNER JOIN (
                 SELECT or_id, MAX(refund_id) AS refund_id
@@ -2295,7 +2877,7 @@ export async function adminGetOrderById(or_id: number, st_id: number): Promise<A
         ${storeSql}
         GROUP BY o.or_id
         LIMIT 1`,
-        params
+        [lg_code, ...params]
     );
 
     const order = orderRows[0];
@@ -2303,13 +2885,41 @@ export async function adminGetOrderById(or_id: number, st_id: number): Promise<A
 
     const [itemRows] = await pool.query<(RowDataPacket & OrderItemDTO)[]>(
         `${orderItemsSelectSql} WHERE oi.or_id = ? ORDER BY oi.oi_id ASC`,
-        ["th", or_id]
+        [lg_code, or_id]
     );
 
-    const shipmentMap = await getOrderShipments([or_id]);
-    return { ...order, items: itemRows, shipments: shipmentMap.get(or_id) ?? [] };
+    const syncedStatuses = await syncShipmentEventsFromShippop([or_id]);
+    const syncedStatus = syncedStatuses.get(or_id);
+    const syncedStatusLabel = syncedStatus === "delivered" ? await getStatusLangName("DELIVERED", lg_code) : null;
+    const shouldApplyDeliveredSync = syncedStatus === "delivered" && !ORDER_RECEIVED_STATUS_CODES.includes(order.status_code as OrderStatusCode);
+    const [shipmentMap, eventMap] = await Promise.all([
+        getOrderShipments([or_id]),
+        getShipmentEvents([or_id]),
+    ]);
+
+    let refundImages: string[] = [];
+    if (order.refund_id) {
+        const [imgRows] = await pool.query<(RowDataPacket & { url_image: string })[]>(
+            "SELECT url_image FROM Refund_images WHERE refund_id = ? ORDER BY rfi_id ASC",
+            [order.refund_id]
+        );
+        refundImages = imgRows.map(r => r.url_image);
+    }
+
+    return {
+        ...order,
+        status: shouldApplyDeliveredSync ? "delivered" : order.status,
+        status_code: (shouldApplyDeliveredSync ? "DELIVERED" : order.status_code ?? null) as string | null,
+        status_label: (shouldApplyDeliveredSync ? syncedStatusLabel : order.status_label ?? null) as string | null,
+        shipment_status: (syncedStatus ?? order.shipment_status ?? null) as string | null,
+        items: itemRows,
+        shipments: shipmentMap.get(or_id) ?? [],
+        shipment_events: eventMap.get(or_id) ?? [],
+        refund_images: refundImages,
+    };
 }
 
+// ดึงรายละเอียด order ของ buyer รายเดียว พร้อม items และ shipment timeline
 export async function getOrderById(or_id: number, u_id: number, lg_code = "th"): Promise<OrderDetailDTO | null> {
     await ensureOrderShipmentLabelColumn();
     await ensureOrderShipmentTables();
@@ -2326,10 +2936,87 @@ export async function getOrderById(or_id: number, u_id: number, lg_code = "th"):
         [lg_code, or_id]
     );
 
-    const shipmentMap = await getOrderShipments([or_id]);
-    return { ...orderRows[0], items: itemRows, shipments: shipmentMap.get(or_id) ?? [] };
+    const syncedStatuses = await syncShipmentEventsFromShippop([or_id]);
+    const syncedStatus = syncedStatuses.get(or_id);
+    const syncedStatusLabel = syncedStatus === "delivered" ? await getStatusLangName("DELIVERED", lg_code) : null;
+    const shouldApplyDeliveredSync = syncedStatus === "delivered" && !ORDER_RECEIVED_STATUS_CODES.includes(orderRows[0].status_code as OrderStatusCode);
+    const [shipmentMap, eventMap] = await Promise.all([
+        getOrderShipments([or_id]),
+        getShipmentEvents([or_id]),
+    ]);
+    return {
+        ...orderRows[0],
+        status: shouldApplyDeliveredSync ? "delivered" : orderRows[0].status,
+        status_code: (shouldApplyDeliveredSync ? "DELIVERED" : orderRows[0].status_code ?? null) as string | null,
+        status_label: (shouldApplyDeliveredSync ? syncedStatusLabel : orderRows[0].status_label ?? null) as string | null,
+        shipment_status: (syncedStatus ?? orderRows[0].shipment_status ?? null) as string | null,
+        items: itemRows,
+        shipments: shipmentMap.get(or_id) ?? [],
+        shipment_events: eventMap.get(or_id) ?? [],
+    };
 }
 
+// buyer ยืนยันรับสินค้าเอง เปลี่ยนสถานะจาก DELIVERED เป็น RECEIVED
+export async function confirmOrderReceived(or_id: number, u_id: number, lg_code = "th"): Promise<OrderDetailDTO> {
+    await ensureOrderShipmentLabelColumn();
+
+    const conn = await pool.getConnection();
+    let committed = false;
+    try {
+        await conn.beginTransaction();
+
+        const [orderRows] = await conn.query<(RowDataPacket & OrderDTO)[]>(
+            `${orderSelectSql} WHERE o.or_id = ? AND o.u_id = ? LIMIT 1 FOR UPDATE`,
+            [lg_code, or_id, u_id]
+        );
+
+        const order = orderRows[0];
+        if (!order) throw new ApiError(404, "ไม่พบ order");
+        if (order.refund_status === "pending") {
+            throw new ApiError(400, "คำสั่งซื้อนี้มีคำขอคืนสินค้า/คืนเงินที่รอตรวจสอบอยู่");
+        }
+        if (ORDER_RECEIVED_STATUS_CODES.includes(order.status_code as OrderStatusCode)) {
+            await conn.commit();
+            committed = true;
+            const currentOrder = await getOrderById(or_id, u_id, lg_code);
+            if (!currentOrder) throw new ApiError(404, "ไม่พบ order");
+            return currentOrder;
+        }
+        if (order.status_code !== "DELIVERED") {
+            throw new ApiError(400, "คำสั่งซื้อนี้ยังไม่สามารถยืนยันรับสินค้าได้");
+        }
+
+        await setOrdersStatus(conn, [or_id], "RECEIVED", {
+            remark: "Buyer confirmed received",
+            whereUserId: u_id,
+        });
+
+        await conn.commit();
+        committed = true;
+
+        const receivedOrder = await getOrderById(or_id, u_id, lg_code);
+        if (!receivedOrder) throw new ApiError(404, "ไม่พบ order");
+
+        await notifyOrderEvent({
+            event: "order:received",
+            order: receivedOrder,
+            actor: "buyer",
+            targets: ["STORE"],
+            title: "ลูกค้ายืนยันรับสินค้าแล้ว",
+            message: `คำสั่งซื้อ ${receivedOrder.order_no} ได้รับการยืนยันรับสินค้าแล้ว`,
+            priority: "HIGH",
+        });
+
+        return receivedOrder;
+    } catch (err) {
+        if (!committed) await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+// buyer ยกเลิก order ที่ยังรอชำระ พร้อมคืน stock reserve และคืน usage คูปอง
 export async function cancelOrder(or_id: number, u_id: number, reason: string, lg_code = "th"): Promise<OrderDetailDTO> {
     await ensureInventoryReservationTable();
     await ensureOrderShipmentLabelColumn();
@@ -2382,7 +3069,10 @@ export async function cancelOrder(or_id: number, u_id: number, reason: string, l
     }
 }
 
-export async function requestRefund(or_id: number, u_id: number, reason: string, lg_code = "th"): Promise<OrderDetailDTO> {
+// buyer ส่งคำขอคืนเงิน/คืนสินค้า พร้อมเหตุผล tracking คืน และรูปหลักฐาน
+export async function requestRefund(or_id: number, u_id: number, reason: string, lg_code = "th", returnTracking = "", imageFiles: Express.Multer.File[] = []): Promise<OrderDetailDTO> {
+    await ensureRefundImagesTable();
+    await ensureRefundReturnTrackingColumn();
     await ensureOrderShipmentLabelColumn();
 
     const conn = await pool.getConnection();
@@ -2400,6 +3090,9 @@ export async function requestRefund(or_id: number, u_id: number, reason: string,
         const statusCode = order.status_code as OrderStatusCode;
         if (!REFUND_REQUESTABLE_STATUS_CODES.includes(statusCode)) {
             throw new ApiError(400, "คำสั่งซื้อนี้ยังไม่สามารถขอคืนเงินได้");
+        }
+        if (statusCode === "DELIVERED" && imageFiles.length === 0) {
+            throw new ApiError(400, "กรุณาแนบรูปถ่ายสินค้าที่ต้องการคืนอย่างน้อย 1 รูป");
         }
 
         // buyer ทำได้แค่สร้าง request pending เท่านั้น
@@ -2429,9 +3122,9 @@ export async function requestRefund(or_id: number, u_id: number, reason: string,
 
         const [refundRes] = await conn.query<ResultSetHeader>(
             `INSERT INTO Refunds
-                (or_id, payment_ref, amount, status, remark, created_at, updated_at)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
-            [or_id, paymentRef, Number(order.grand_total).toFixed(2), reason, new Date(), new Date()]
+                (or_id, payment_ref, amount, status, remark, return_tracking, created_at, updated_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`,
+            [or_id, paymentRef, Number(order.grand_total).toFixed(2), reason, returnTracking || null, new Date(), new Date()]
         );
 
         const [itemRows] = await conn.query<(RowDataPacket & OrderItemDTO)[]>(
@@ -2454,7 +3147,27 @@ export async function requestRefund(or_id: number, u_id: number, reason: string,
             );
         }
 
+        if (statusCode === "DELIVERED") {
+            await setOrdersStatus(conn, [or_id], "RETURN_REQUESTED", { remark: reason });
+        }
+
         await conn.commit();
+
+        // อัปโหลดรูปหลัง commit เพื่อไม่ให้ rollback ติด network error
+        const refundImageUrls: string[] = [];
+        if (imageFiles.length > 0) {
+            const refundId = refundRes.insertId;
+            await Promise.all(
+                imageFiles.map(async (file, i) => {
+                    const url = await fileUploadImage(file, `refund_${refundId}_${i}`, "refunds");
+                    refundImageUrls.push(url);
+                    await pool.query(
+                        "INSERT INTO Refund_images (refund_id, url_image, created_at) VALUES (?, ?, ?)",
+                        [refundId, url, new Date()]
+                    );
+                })
+            );
+        }
 
         const updatedOrder = await getOrderById(or_id, u_id, lg_code);
         if (!updatedOrder) throw new ApiError(404, "ไม่พบ order");
@@ -2464,10 +3177,24 @@ export async function requestRefund(or_id: number, u_id: number, reason: string,
             order: updatedOrder,
             actor: "buyer",
             targets: ["STORE"],
-            title: "มีคำขอคืนเงิน",
-            message: `ลูกค้าขอคืนเงินคำสั่งซื้อ ${updatedOrder.order_no} เหตุผล: ${reason}`,
+            title: "มีคำขอคืนสินค้า/คืนเงิน",
+            message: `ลูกค้าขอคืนสินค้าคำสั่งซื้อ ${updatedOrder.order_no} เหตุผล: ${reason}`,
             priority: "URGENT",
         });
+
+        try {
+            await chatService.postRefundContextToConversation({
+                userId: u_id,
+                storeId: Number(updatedOrder.st_id),
+                orderNo: updatedOrder.order_no ?? `ORDER-${or_id}`,
+                reason,
+                amount: Number(updatedOrder.grand_total),
+                returnTracking,
+                imageUrls: refundImageUrls,
+            });
+        } catch (error) {
+            console.warn(`[orders] post refund context to chat failed for order ${or_id}:`, error);
+        }
 
         return updatedOrder;
     } catch (err) {
@@ -2478,8 +3205,12 @@ export async function requestRefund(or_id: number, u_id: number, reason: string,
     }
 }
 
-export async function approveRefundRequest(or_id: number, st_id: number, note = ""): Promise<AdminOrderDetailDTO> {
+// admin อนุมัติคำขอคืนเงินและพยายาม refund ผ่าน Omise อัตโนมัติ
+export async function approveRefundRequest(or_id: number, st_id: number, note = "", lg_code = "th"): Promise<AdminOrderDetailDTO> {
+    await ensureInventoryReservationTable();
+
     const conn = await pool.getConnection();
+    let committed = false;
 
     try {
         await conn.beginTransaction();
@@ -2490,13 +3221,15 @@ export async function approveRefundRequest(or_id: number, st_id: number, note = 
         const [rows] = await conn.query<(RowDataPacket & {
             or_id: number;
             order_no: string;
+            status_code: string | null;
             payment_ref: string | null;
             refund_id: number;
             amount: number;
             refund_status: string;
         })[]>(
-            `SELECT o.or_id, o.order_no, p.payment_ref, r.refund_id, r.amount, r.status AS refund_status
+            `SELECT o.or_id, o.order_no, os.s_code AS status_code, p.payment_ref, r.refund_id, r.amount, r.status AS refund_status
              FROM Orders o
+             LEFT JOIN Status os ON os.s_id = o.s_id
              INNER JOIN Refunds r ON r.or_id = o.or_id
              INNER JOIN Payment_orders po ON po.or_id = o.or_id
              INNER JOIN Payments p ON p.pay_id = po.pay_id
@@ -2512,19 +3245,54 @@ export async function approveRefundRequest(or_id: number, st_id: number, note = 
 
         const refund = rows[0];
         if (!refund) throw new ApiError(404, "ไม่พบคำขอคืนเงินที่รอดำเนินการ");
+        if (refund.status_code === "RETURN_REQUESTED") {
+            throw new ApiError(400, "คำขอนี้เป็นการคืนสินค้า กรุณายืนยันรับสินค้าคืนก่อนคืนเงิน");
+        }
         if (!refund.payment_ref) throw new ApiError(400, "ไม่พบ payment reference สำหรับคืนเงิน");
 
-        const omiseRefund = await createOmiseRefund({
-            chargeId: refund.payment_ref,
-            amount: Number(refund.amount),
-            metadata: {
-                order_id: String(refund.or_id),
-                order_no: refund.order_no,
-                refund_id: String(refund.refund_id),
-            },
-        });
+        try {
+            await createOmiseRefund({
+                chargeId: refund.payment_ref,
+                amount: Number(refund.amount),
+                metadata: {
+                    order_id: String(refund.or_id),
+                    order_no: refund.order_no,
+                    refund_id: String(refund.refund_id),
+                },
+            });
+        } catch (err) {
+            const details = err instanceof ApiError ? err.details as { code?: string; message?: string } : null;
+            const omiseMessage = details?.message || (err instanceof Error ? err.message : "ไม่สามารถคืนเงินผ่าน Omise ได้");
+            const failureRemark = [
+                note.trim(),
+                `คืนเงินผ่าน Omise ไม่สำเร็จ: ${omiseMessage}`,
+                "ต้องโอนคืนลูกค้าเอง เพราะช่องทางชำระเงินนี้ไม่รองรับการคืนผ่าน Omise หรือ Omise ปฏิเสธการคืนเงิน",
+            ].filter(Boolean).join(" | ");
 
-        const remark = [note.trim(), omiseRefund.id ? `Omise refund: ${omiseRefund.id}` : null]
+            await conn.query(
+                "UPDATE Refunds SET status = 'failed', remark = ?, updated_at = ? WHERE refund_id = ?",
+                [failureRemark, new Date(), refund.refund_id]
+            );
+            await conn.commit();
+            committed = true;
+
+            const order = await adminGetOrderById(or_id, st_id, lg_code);
+            if (!order) throw new ApiError(404, "ไม่พบ order");
+
+            await notifyOrderEvent({
+                event: "order:refund_rejected",
+                order,
+                actor: "admin",
+                targets: ["USER"],
+                title: "กำลังดำเนินการคืนเงิน",
+                message: `คำสั่งซื้อ ${order.order_no} ต้องดำเนินการโอนคืนด้วยตนเอง ร้านค้าจะติดต่อประสานงานเพิ่มเติม`,
+                priority: "HIGH",
+            });
+
+            return order;
+        }
+
+        const remark = [note.trim(), "คืนเงินผ่าน Omise สำเร็จ"]
             .filter(Boolean)
             .join(" | ");
 
@@ -2537,16 +3305,19 @@ export async function approveRefundRequest(or_id: number, st_id: number, note = 
             remark: remark || "Refund approved",
         });
 
-        await conn.commit();
+        await restockConsumedReservationsForOrders(conn, [or_id]);
 
-        const order = await adminGetOrderById(or_id, st_id);
+        await conn.commit();
+        committed = true;
+
+        const order = await adminGetOrderById(or_id, st_id, lg_code);
         if (!order) throw new ApiError(404, "ไม่พบ order");
 
         await notifyOrderEvent({
             event: "order:refund_approved",
             order,
             actor: "admin",
-            targets: ["USER", "STORE"],
+            targets: ["USER"],
             title: "อนุมัติคืนเงินแล้ว",
             message: `คำสั่งซื้อ ${order.order_no} ได้รับการอนุมัติคืนเงินแล้ว`,
             priority: "HIGH",
@@ -2554,18 +3325,20 @@ export async function approveRefundRequest(or_id: number, st_id: number, note = 
 
         return order;
     } catch (err) {
-        await conn.rollback();
+        if (!committed) await conn.rollback();
         throw err;
     } finally {
         conn.release();
     }
 }
 
+// admin เปลี่ยนสถานะ order ตาม flow ร้าน เช่น PROCESSING/PACKED/READY_TO_SHIP
 export async function adminUpdateOrderStatus(
     or_id: number,
     st_id: number,
     statusCode: OrderStatusCode,
-    note = ""
+    note = "",
+    lg_code = "th"
 ): Promise<AdminOrderDetailDTO> {
     await ensureOrderShipmentLabelColumn();
 
@@ -2624,7 +3397,7 @@ export async function adminUpdateOrderStatus(
 
         await conn.commit();
 
-        const updated = await adminGetOrderById(or_id, st_id);
+        const updated = await adminGetOrderById(or_id, st_id, lg_code);
         if (!updated) throw new ApiError(404, "ไม่พบ order");
 
         await notifyOrderEvent({
@@ -2646,6 +3419,7 @@ export async function adminUpdateOrderStatus(
     }
 }
 
+// สร้าง tracking URL จาก template ของ carrier และเลข tracking
 function buildTrackingUrl(template: string | null | undefined, trackingNo: string): string | null {
     if (!template?.trim()) return null;
 
@@ -2660,17 +3434,23 @@ function buildTrackingUrl(template: string | null | undefined, trackingNo: strin
     return `${trimmed}${separator}${encodeURIComponent(trackingNo)}`;
 }
 
-function positiveEnvNumber(name: string, fallback: number): number {
-    const value = Number(process.env[name]);
-    return Number.isFinite(value) && value > 0 ? value : fallback;
+// ตรวจเลขน้ำหนัก/ขนาดพัสดุว่ามีค่าเป็นบวกก่อนส่งไป SHIPPOP
+function positiveShipmentNumber(value: unknown, label: string, productName: string): number {
+    const numberValue = Number(value);
+    if (!Number.isFinite(numberValue) || numberValue <= 0) {
+        throw new ApiError(400, `สินค้า ${productName} ยังไม่มี${label}สำหรับสร้าง shipment`);
+    }
+    return Math.ceil(numberValue);
 }
 
+// สร้าง shipment จริงผ่าน provider แล้วบันทึก shipment/item/label/tracking กลับเข้า order
 async function createShipmentForOrder(
     conn: PoolConnection,
     or_id: number,
     st_id: number
 ): Promise<void> {
     await ensureOrderShipmentTables();
+    await shippingService.ensureShippingCarrierProviderColumn();
 
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     const params = st_id === ADMIN_ALL_STORE_ID ? [or_id] : [or_id, st_id];
@@ -2717,7 +3497,7 @@ async function createShipmentForOrder(
             subdist.name_in_thai AS shipping_subdistrict_name,
             o.grand_total,
             COUNT(oi.oi_id) AS item_count,
-            sc.sc_code AS shipping_carrier_code,
+            COALESCE(sc.shippop_courier_code, sc.sc_code) AS shipping_carrier_code,
             o.tracking_no,
             loc.loc_address AS sender_address,
             loc.zip_code AS sender_zip_code,
@@ -2856,14 +3636,23 @@ async function createShipmentForOrder(
             product_name: string;
             qty: number;
             unit_price: number;
+            weight_g: number | null;
+            length_cm: number | null;
+            width_cm: number | null;
+            height_cm: number | null;
         })[]>(
             `SELECT
                 oi.sku,
                 oi.product_name,
                 osi.qty,
-                oi.unit_price
+                oi.unit_price,
+                pv.weight_g,
+                pv.length_cm,
+                pv.width_cm,
+                pv.height_cm
              FROM Order_shipment_items osi
              INNER JOIN Order_items oi ON oi.oi_id = osi.oi_id
+             INNER JOIN ProductVariants pv ON pv.pv_id = oi.pv_id
              WHERE osi.os_id = ?
              ORDER BY osi.osi_id ASC`,
             [shipment.os_id]
@@ -2871,6 +3660,15 @@ async function createShipmentForOrder(
 
         const firstItemName = itemRows[0]?.product_name ?? shipment.shipment_no;
         const totalQty = itemRows.reduce((sum, item) => sum + Number(item.qty ?? 0), 0);
+        const totalWeightG = itemRows.reduce((sum, item) => {
+            const productName = item.product_name || shipment.shipment_no;
+            return sum + positiveShipmentNumber(item.weight_g, "น้ำหนัก", productName) * Number(item.qty ?? 1);
+        }, 0);
+        const maxWidthCm = Math.max(...itemRows.map((item) => positiveShipmentNumber(item.width_cm, "ความกว้าง", item.product_name || shipment.shipment_no)));
+        const totalLengthCm = itemRows.reduce((sum, item) => {
+            return sum + positiveShipmentNumber(item.length_cm, "ความยาว", item.product_name || shipment.shipment_no) * Number(item.qty ?? 1);
+        }, 0);
+        const maxHeightCm = Math.max(...itemRows.map((item) => positiveShipmentNumber(item.height_cm, "ความสูง", item.product_name || shipment.shipment_no)));
 
         const result = await createShippopShipment({
             email: shipment.sender_email ?? order.st_email ?? "",
@@ -2897,21 +3695,23 @@ async function createShipmentForOrder(
             },
             parcel: {
                 name: firstItemName,
-                weight: positiveEnvNumber("SHIPPOP_DEFAULT_WEIGHT_G", 1000),
-                width: positiveEnvNumber("SHIPPOP_DEFAULT_WIDTH_CM", 20),
-                length: positiveEnvNumber("SHIPPOP_DEFAULT_LENGTH_CM", 30),
-                height: positiveEnvNumber("SHIPPOP_DEFAULT_HEIGHT_CM", 10),
+                weight: totalWeightG,
+                width: maxWidthCm,
+                length: totalLengthCm,
+                height: maxHeightCm,
             },
             products: itemRows.map((item, index) => ({
                 product_code: item.sku ?? `${shipment.shipment_no}-${index + 1}`,
                 name: item.product_name,
                 price: Number(item.unit_price ?? 0),
                 amount: Number(item.qty ?? 1),
-                weight: positiveEnvNumber("SHIPPOP_DEFAULT_ITEM_WEIGHT_G", 500),
+                weight: positiveShipmentNumber(item.weight_g, "น้ำหนัก", item.product_name || shipment.shipment_no),
             })),
             declaredValue: Number(order.grand_total ?? 0),
             remark: `Order ${order.order_no} / ${shipment.shipment_no} (${Math.max(totalQty, 1)} items)`,
         });
+
+        const displayTrackingNo = result.courierTrackingCode ?? result.shippopTrackingCode;
 
         await conn.query(
             `UPDATE Order_shipments
@@ -2921,10 +3721,10 @@ async function createShipmentForOrder(
                  status = ?,
                  updated_at = ?
              WHERE os_id = ?`,
-            [result.shippopTrackingCode, result.trackingUrl, result.labelUrl, result.shipmentStatus, new Date(), shipment.os_id]
+            [displayTrackingNo, result.trackingUrl, result.labelUrl, result.shipmentStatus, new Date(), shipment.os_id]
         );
 
-        trackingNos.push(result.shippopTrackingCode);
+        trackingNos.push(displayTrackingNo);
         if (result.trackingUrl) trackingUrls.push(result.trackingUrl);
         if (result.labelUrl) labelUrls.push(result.labelUrl);
         if (result.shipmentStatus) statuses.push(result.shipmentStatus);
@@ -2950,10 +3750,12 @@ async function createShipmentForOrder(
     );
 }
 
+// admin กรอกหรือแก้ไขเลข tracking เองเมื่อไม่ได้สร้าง shipment ผ่าน provider
 export async function adminUpdateOrderTracking(
     or_id: number,
     st_id: number,
-    trackingNoInput: string
+    trackingNoInput: string,
+    lg_code = "th"
 ): Promise<AdminOrderDetailDTO> {
     await ensureOrderShipmentTables();
 
@@ -3017,7 +3819,7 @@ export async function adminUpdateOrderTracking(
 
         await conn.commit();
 
-        const updated = await adminGetOrderById(or_id, st_id);
+        const updated = await adminGetOrderById(or_id, st_id, lg_code);
         if (!updated) throw new ApiError(404, "ไม่พบ order");
 
         await notifyOrderEvent({
@@ -3039,9 +3841,11 @@ export async function adminUpdateOrderTracking(
     }
 }
 
+// admin สร้าง shipment ผ่านระบบขนส่งสำหรับ order ที่ READY_TO_SHIP
 export async function adminCreateOrderShipment(
     or_id: number,
-    st_id: number
+    st_id: number,
+    lg_code = "th"
 ): Promise<AdminOrderDetailDTO> {
     await ensureOrderShipmentLabelColumn();
     await ensureOrderShipmentTables();
@@ -3095,7 +3899,7 @@ export async function adminCreateOrderShipment(
 
         await conn.commit();
 
-        const updated = await adminGetOrderById(or_id, st_id);
+        const updated = await adminGetOrderById(or_id, st_id, lg_code);
         if (!updated) throw new ApiError(404, "ไม่พบ order");
 
         await notifyOrderEvent({
@@ -3117,7 +3921,160 @@ export async function adminCreateOrderShipment(
     }
 }
 
-export async function rejectRefundRequest(or_id: number, st_id: number, note: string): Promise<AdminOrderDetailDTO> {
+// action สำหรับ dev: จำลองว่า order จัดส่งสำเร็จและสร้าง event delivered
+export async function adminDevMarkOrderDelivered(
+    or_id: number,
+    st_id: number,
+    lg_code = "th"
+): Promise<AdminOrderDetailDTO> {
+    if (!allowDevShipmentActions()) {
+        throw new ApiError(403, "Dev shipment actions are disabled");
+    }
+
+    await ensureOrderShipmentLabelColumn();
+    await ensureOrderShipmentTables();
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+        const params = st_id === ADMIN_ALL_STORE_ID ? [or_id] : [or_id, st_id];
+
+        const [orderRows] = await conn.query<(RowDataPacket & {
+            or_id: number;
+            status_code: string | null;
+            refund_status: string | null;
+        })[]>(
+            `SELECT o.or_id, os.s_code AS status_code, latest_refund.status AS refund_status
+             FROM Orders o
+             LEFT JOIN Status os ON os.s_id = o.s_id
+             LEFT JOIN (
+                SELECT r1.or_id, r1.status
+                FROM Refunds r1
+                INNER JOIN (
+                    SELECT or_id, MAX(refund_id) AS refund_id
+                    FROM Refunds
+                    GROUP BY or_id
+                ) latest ON latest.refund_id = r1.refund_id
+             ) latest_refund ON latest_refund.or_id = o.or_id
+             WHERE o.or_id = ?
+               ${storeSql}
+             LIMIT 1
+             FOR UPDATE`,
+            params
+        );
+
+        const order = orderRows[0];
+        if (!order) throw new ApiError(404, "ไม่พบ order");
+        if (order.refund_status === "pending") {
+            throw new ApiError(400, "คำสั่งซื้อนี้มีคำขอคืนเงินรอตรวจสอบ กรุณาดำเนินการคำขอคืนเงินก่อน");
+        }
+        if (["CANCELLED", "REFUNDED"].includes(order.status_code ?? "")) {
+            throw new ApiError(400, "ไม่สามารถจำลองจัดส่งสำเร็จสำหรับคำสั่งซื้อที่ยกเลิกหรือคืนเงินแล้ว");
+        }
+
+        const [shipmentRows] = await conn.query<(RowDataPacket & {
+            os_id: number;
+            tracking_no: string | null;
+            tracking_url: string | null;
+        })[]>(
+            `SELECT os_id, tracking_no, tracking_url
+             FROM Order_shipments
+             WHERE or_id = ?
+             ORDER BY os_id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [or_id]
+        );
+
+        const shipment = shipmentRows[0];
+        if (!shipment) {
+            throw new ApiError(400, "ยังไม่มี shipment สำหรับคำสั่งซื้อนี้ กรุณาสร้าง shipment ก่อน");
+        }
+
+        const occurredAt = new Date();
+        const state: ShippopTrackingState = {
+            status: "POD",
+            datetime: occurredAt.toISOString(),
+            location: "DEV",
+            description: "Delivery successfully ,จัดส่งพัสดุสำเร็จ (DEV)",
+            raw: { dev_simulated: true },
+        };
+        const trackingCode = shipment.tracking_no ?? `DEV-${or_id}`;
+
+        await conn.query(
+            `INSERT INTO Order_shipment_events
+             (os_id, or_id, tracking_code, courier_tracking_code, status, title, description, location, occurred_at, raw_json, event_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               tracking_code = VALUES(tracking_code),
+               courier_tracking_code = VALUES(courier_tracking_code),
+               title = VALUES(title),
+               description = VALUES(description),
+               location = VALUES(location),
+               raw_json = VALUES(raw_json),
+               updated_at = CURRENT_TIMESTAMP`,
+            [
+                Number(shipment.os_id),
+                or_id,
+                trackingCode,
+                shipment.tracking_no,
+                state.status,
+                shipmentEventTitle(state.description),
+                shipmentEventDescription(state.description),
+                state.location,
+                occurredAt,
+                JSON.stringify(state.raw),
+                eventHash(Number(shipment.os_id), state),
+            ]
+        );
+
+        await conn.query(
+            `UPDATE Order_shipments
+             SET status = 'delivered',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE os_id = ?`,
+            [shipment.os_id]
+        );
+
+        await conn.query(
+            `UPDATE Orders o
+             LEFT JOIN Status delivered_status ON delivered_status.s_code = 'DELIVERED'
+             SET o.s_id = COALESCE(delivered_status.s_id, o.s_id),
+                 o.status = 'delivered',
+                 o.shipment_status = 'delivered',
+                 o.update_at = CURRENT_TIMESTAMP
+             WHERE o.or_id = ?`,
+            [or_id]
+        );
+
+        await conn.commit();
+
+        const updated = await adminGetOrderById(or_id, st_id, lg_code);
+        if (!updated) throw new ApiError(404, "ไม่พบ order");
+
+        await notifyOrderEvent({
+            event: "order:status_updated",
+            order: updated,
+            actor: "admin",
+            targets: ["USER"],
+            title: "จำลองจัดส่งสำเร็จ",
+            message: `คำสั่งซื้อ ${updated.order_no} ถูกจำลองเป็นจัดส่งสำเร็จสำหรับทดสอบระบบ`,
+            priority: "NORMAL",
+        });
+
+        return updated;
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+// admin ปฏิเสธคำขอคืนเงิน/คืนสินค้า พร้อมบันทึกเหตุผลและแจ้ง buyer
+export async function rejectRefundRequest(or_id: number, st_id: number, note: string, lg_code = "th"): Promise<AdminOrderDetailDTO> {
     if (note.trim().length < 3) throw new ApiError(400, "กรุณาระบุเหตุผลในการปฏิเสธคำขอคืนเงิน");
 
     const conn = await pool.getConnection();
@@ -3150,14 +4107,14 @@ export async function rejectRefundRequest(or_id: number, st_id: number, note: st
 
         await conn.commit();
 
-        const order = await adminGetOrderById(or_id, st_id);
+        const order = await adminGetOrderById(or_id, st_id, lg_code);
         if (!order) throw new ApiError(404, "ไม่พบ order");
 
         await notifyOrderEvent({
             event: "order:refund_rejected",
             order,
             actor: "admin",
-            targets: ["USER", "STORE"],
+            targets: ["USER"],
             title: "คำขอคืนเงินไม่ผ่านการอนุมัติ",
             message: `คำขอคืนเงินคำสั่งซื้อ ${order.order_no} ไม่ผ่านการอนุมัติ เหตุผล: ${note.trim()}`,
             priority: "HIGH",
@@ -3172,6 +4129,217 @@ export async function rejectRefundRequest(or_id: number, st_id: number, note: st
     }
 }
 
+// admin ยืนยันรับสินค้าคืน แล้วดำเนินการคืนเงินหรือบันทึกว่าให้โอนคืนเอง
+export async function confirmReturnReceived(or_id: number, st_id: number, note = "", lg_code = "th"): Promise<AdminOrderDetailDTO> {
+    await ensureInventoryReservationTable();
+
+    const conn = await pool.getConnection();
+    let committed = false;
+
+    try {
+        await conn.beginTransaction();
+
+        const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+        const params = st_id === ADMIN_ALL_STORE_ID ? [or_id] : [or_id, st_id];
+
+        const [rows] = await conn.query<(RowDataPacket & {
+            or_id: number;
+            order_no: string;
+            status_code: string | null;
+            payment_ref: string | null;
+            refund_id: number;
+            amount: number;
+            return_tracking: string | null;
+        })[]>(
+            `SELECT o.or_id, o.order_no, os.s_code AS status_code, p.payment_ref,
+                    r.refund_id, r.amount, r.return_tracking
+             FROM Orders o
+             LEFT JOIN Status os ON os.s_id = o.s_id
+             INNER JOIN Refunds r ON r.or_id = o.or_id
+             INNER JOIN Payment_orders po ON po.or_id = o.or_id
+             INNER JOIN Payments p ON p.pay_id = po.pay_id
+             WHERE o.or_id = ?
+               ${storeSql}
+               AND r.status = 'pending'
+               AND p.payment_status = 'paid'
+             ORDER BY r.refund_id DESC, p.pay_id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            params
+        );
+
+        const refund = rows[0];
+        if (!refund) throw new ApiError(404, "ไม่พบคำขอคืนสินค้าที่รอดำเนินการ");
+        if (refund.status_code !== "RETURN_REQUESTED") {
+            throw new ApiError(400, "คำสั่งซื้อนี้ไม่ได้อยู่ในสถานะรอรับสินค้าคืน");
+        }
+        if (!refund.return_tracking) {
+            throw new ApiError(400, "ยังไม่มีเลข tracking สำหรับสินค้าที่ลูกค้าส่งคืน");
+        }
+        if (!refund.payment_ref) throw new ApiError(400, "ไม่พบ payment reference สำหรับคืนเงิน");
+
+        try {
+            await createOmiseRefund({
+                chargeId: refund.payment_ref,
+                amount: Number(refund.amount),
+                metadata: {
+                    order_id: String(refund.or_id),
+                    order_no: refund.order_no,
+                    refund_id: String(refund.refund_id),
+                    return_tracking: refund.return_tracking,
+                },
+            });
+        } catch (err) {
+            const details = err instanceof ApiError ? err.details as { code?: string; message?: string } : null;
+            const omiseMessage = details?.message || (err instanceof Error ? err.message : "ไม่สามารถคืนเงินผ่าน Omise ได้");
+            const failureRemark = [
+                note.trim() ? `รับสินค้าคืนแล้ว: ${note.trim()}` : "รับสินค้าคืนแล้ว",
+                `คืนเงินผ่าน Omise ไม่สำเร็จ: ${omiseMessage}`,
+                "ต้องโอนคืนลูกค้าเอง เพราะช่องทางชำระเงินนี้ไม่รองรับการคืนผ่าน Omise หรือ Omise ปฏิเสธการคืนเงิน",
+            ].filter(Boolean).join(" | ");
+
+            await conn.query(
+                "UPDATE Refunds SET status = 'failed', remark = ?, updated_at = ? WHERE refund_id = ?",
+                [failureRemark, new Date(), refund.refund_id]
+            );
+            await conn.commit();
+            committed = true;
+
+            const order = await adminGetOrderById(or_id, st_id, lg_code);
+            if (!order) throw new ApiError(404, "ไม่พบ order");
+
+            await notifyOrderEvent({
+                event: "order:refund_rejected",
+                order,
+                actor: "admin",
+                targets: ["USER"],
+                title: "ได้รับสินค้าคืนแล้ว",
+                message: `ร้านค้าได้รับสินค้าคืนสำหรับคำสั่งซื้อ ${order.order_no} แล้ว และจะดำเนินการโอนเงินคืนด้วยตนเอง`,
+                priority: "HIGH",
+            });
+
+            return order;
+        }
+
+        const remark = [
+            note.trim() ? `รับสินค้าคืนแล้ว: ${note.trim()}` : "รับสินค้าคืนแล้ว",
+            "คืนเงินผ่าน Omise สำเร็จ",
+        ].filter(Boolean).join(" | ");
+
+        await conn.query(
+            "UPDATE Refunds SET status = 'succeeded', remark = ?, updated_at = ? WHERE refund_id = ?",
+            [remark, new Date(), refund.refund_id]
+        );
+
+        await setOrdersStatus(conn, [or_id], "RETURN_REQUESTED_COMPLETED", {
+            remark,
+        });
+
+        await restockConsumedReservationsForOrders(conn, [or_id]);
+
+        await conn.commit();
+        committed = true;
+
+        const order = await adminGetOrderById(or_id, st_id, lg_code);
+        if (!order) throw new ApiError(404, "ไม่พบ order");
+
+        await notifyOrderEvent({
+            event: "order:refund_approved",
+            order,
+            actor: "admin",
+            targets: ["USER"],
+            title: "คืนสินค้า/คืนเงินสำเร็จ",
+            message: `คำสั่งซื้อ ${order.order_no} รับสินค้าคืนและคืนเงินเรียบร้อยแล้ว`,
+            priority: "HIGH",
+        });
+
+        return order;
+    } catch (err) {
+        if (!committed) await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+// admin ยืนยันว่าโอนเงินคืนแบบ manual เรียบร้อยแล้ว
+export async function confirmManualRefundRequest(or_id: number, st_id: number, note = "", lg_code = "th"): Promise<AdminOrderDetailDTO> {
+    await ensureInventoryReservationTable();
+
+    const conn = await pool.getConnection();
+    let committed = false;
+    try {
+        await conn.beginTransaction();
+
+        const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
+        const params = st_id === ADMIN_ALL_STORE_ID ? [or_id] : [or_id, st_id];
+
+        const [rows] = await conn.query<(RowDataPacket & {
+            refund_id: number;
+            remark: string | null;
+            status_code: string | null;
+        })[]>(
+            `SELECT r.refund_id, r.remark, os.s_code AS status_code
+             FROM Orders o
+             LEFT JOIN Status os ON os.s_id = o.s_id
+             INNER JOIN Refunds r ON r.or_id = o.or_id
+             WHERE o.or_id = ?
+               ${storeSql}
+               AND r.status = 'failed'
+             ORDER BY r.refund_id DESC
+             LIMIT 1
+             FOR UPDATE`,
+            params
+        );
+
+        const refund = rows[0];
+        if (!refund) throw new ApiError(404, "ไม่พบคำขอคืนเงินที่ต้องโอนคืนเอง");
+        if (!refund.remark?.includes("ต้องโอนคืน")) {
+            throw new ApiError(400, "คำขอคืนเงินนี้ไม่ใช่รายการที่ต้องโอนคืนเอง");
+        }
+
+        const remark = [
+            refund.remark,
+            note.trim() ? `ยืนยันโอนคืนเอง: ${note.trim()}` : "ยืนยันโอนคืนเองแล้ว",
+        ].filter(Boolean).join(" | ");
+
+        await conn.query(
+            "UPDATE Refunds SET status = 'succeeded', remark = ?, updated_at = ? WHERE refund_id = ?",
+            [remark, new Date(), refund.refund_id]
+        );
+
+        await setOrdersStatus(conn, [or_id], refund.status_code === "RETURN_REQUESTED" ? "RETURN_REQUESTED_COMPLETED" : "REFUNDED", {
+            remark,
+        });
+
+        await restockConsumedReservationsForOrders(conn, [or_id]);
+
+        await conn.commit();
+        committed = true;
+
+        const order = await adminGetOrderById(or_id, st_id, lg_code);
+        if (!order) throw new ApiError(404, "ไม่พบ order");
+
+        await notifyOrderEvent({
+            event: "order:refund_approved",
+            order,
+            actor: "admin",
+            targets: ["USER"],
+            title: "ยืนยันโอนคืนลูกค้าแล้ว",
+            message: `คำสั่งซื้อ ${order.order_no} ได้รับการยืนยันว่าโอนเงินคืนลูกค้าแล้ว`,
+            priority: "HIGH",
+        });
+
+        return order;
+    } catch (err) {
+        if (!committed) await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+// job batch: ยกเลิก order pending ที่หมดเวลาชำระ พร้อมคืน stock และคูปอง
 export async function expirePendingPaymentOrders(limit = 50): Promise<number> {
     await ensureInventoryReservationTable();
     await ensureOrderShipmentLabelColumn();
@@ -3231,7 +4399,115 @@ export async function expirePendingPaymentOrders(limit = 50): Promise<number> {
     }
 }
 
+// job batch: เปลี่ยน DELIVERED เป็น AUTO_RECEIVED เมื่อครบกำหนดตรวจสอบและไม่มี refund pending
+export async function autoReceiveDeliveredOrders(days = 2, limit = 100): Promise<number> {
+    await ensureOrderShipmentTables();
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [orders] = await conn.query<(RowDataPacket & {
+            or_id: number;
+            order_no: string;
+            st_id: number;
+            u_id: number;
+        })[]>(
+            `SELECT o.or_id, o.order_no, o.st_id, o.u_id
+             FROM Orders o
+             INNER JOIN Status os ON os.s_id = o.s_id AND os.s_code = 'DELIVERED'
+             LEFT JOIN (
+                 SELECT
+                     or_id,
+                     MAX(occurred_at) AS delivered_at
+                 FROM Order_shipment_events
+                 WHERE status = 'POD'
+                    OR LOWER(COALESCE(description, '')) LIKE '%delivery successfully%'
+                 GROUP BY or_id
+             ) delivered_event ON delivered_event.or_id = o.or_id
+             WHERE DATE_ADD(COALESCE(delivered_event.delivered_at, o.update_at), INTERVAL ? DAY) <= NOW()
+               AND NOT EXISTS (
+                   SELECT 1 FROM Refunds r
+                   WHERE r.or_id = o.or_id
+                     AND r.status = 'pending'
+               )
+             ORDER BY COALESCE(delivered_event.delivered_at, o.update_at) ASC
+             LIMIT ?
+             FOR UPDATE`,
+            [days, limit]
+        );
+
+        const orderIds = orders.map(order => Number(order.or_id));
+        if (orderIds.length === 0) {
+            await conn.commit();
+            return 0;
+        }
+
+        await setOrdersStatus(conn, orderIds, "AUTO_RECEIVED", {
+            remark: `Auto received after ${days} days`,
+        });
+
+        await conn.commit();
+
+        await notifyManyOrderEvents(orders.map(order => ({
+            event: "order:auto_received",
+            order: {
+                ...order,
+                status: toLegacyOrderStatus("AUTO_RECEIVED"),
+                status_code: "AUTO_RECEIVED",
+                status_label: statusLabelByCode.AUTO_RECEIVED ?? null,
+            },
+            actor: "system",
+            targets: ["USER", "STORE"],
+            title: "ระบบยืนยันรับสินค้าอัตโนมัติ",
+            message: `คำสั่งซื้อ ${order.order_no} ครบกำหนดตรวจสอบสินค้า ${days} วันแล้ว ระบบจึงยืนยันรับสินค้าให้อัตโนมัติ`,
+            priority: "NORMAL",
+        })));
+
+        return orderIds.length;
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+// เริ่ม background job สำหรับยืนยันรับสินค้าอัตโนมัติเป็นรอบ ๆ
+export function startAutoReceiveDeliveredOrdersJob(intervalMs = 60 * 60 * 1000, days = 2): void {
+    if (autoReceiveJobStarted) return;
+    autoReceiveJobStarted = true;
+
+    const run = async () => {
+        try {
+            const count = await autoReceiveDeliveredOrders(days);
+            if (count > 0) {
+                console.log(`[orders] auto received ${count} delivered order(s) after ${days} day(s)`);
+            }
+        } catch (err) {
+            console.error("[orders] auto receive delivered orders failed:", err);
+        }
+    };
+
+    void run();
+    setInterval(() => { void run(); }, intervalMs);
+}
+
+/**
+ * Job ตรวจสอบ order ที่รอชำระเงินแต่หมดเวลาแล้ว
+ *
+ * การทำงาน:
+ *   - รันทันทีตอน server start เพื่อจัดการ order ค้างจากก่อนหน้า
+ *   - วนซ้ำทุก intervalMs (default 60 วินาที) ตลอดอายุ process
+ *   - แต่ละรอบเรียก expirePendingPaymentOrders() ซึ่ง:
+ *       1. หา order ที่ status = รอชำระ และ payment_expires_at < NOW()
+ *       2. เปลี่ยน status → CANCELLED
+ *       3. คืน reserved stock inventory กลับ
+ *       4. ส่ง notification แจ้งร้านค้าและผู้ซื้อ
+ */
+// เริ่ม background job สำหรับยกเลิก order ที่หมดเวลาชำระเงิน
 export function startPaymentExpirationJob(intervalMs = 60_000): void {
+    // ป้องกัน job ซ้ำหาก startPaymentExpirationJob() ถูกเรียกหลายครั้ง
     if (expirationJobStarted) return;
     expirationJobStarted = true;
 

@@ -13,11 +13,71 @@ import type {
   CalculateInput,
   CalculateResult,
 } from "./shipping.type.js";
-import { quoteShippopRates } from "./providers/shippop.js";
+import { getShippopCarrierPreset, normalizeShippopCourierCode, quoteShippopRates } from "./providers/shippop.js";
 
 // ─── Carriers ────────────────────────────────────────────────────────────────
 
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function envMoney(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+let carrierProviderColumnReady: Promise<void> | null = null;
+
+export async function ensureShippingCarrierProviderColumn(): Promise<void> {
+  carrierProviderColumnReady ??= pool.query(
+    `SELECT COLUMN_NAME AS column_name
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'Shipping_carriers'
+       AND COLUMN_NAME = 'shippop_courier_code'`
+  )
+    .then(async ([columns]) => {
+      if ((columns as unknown[]).length === 0) {
+        await pool.query(
+          "ALTER TABLE Shipping_carriers ADD COLUMN shippop_courier_code VARCHAR(30) NULL AFTER sc_name"
+        );
+      }
+    })
+    .then(() => undefined);
+
+  return carrierProviderColumnReady;
+}
+
+function resolveShippopCarrierConfig(scCode: string, providerCode?: string | null) {
+  const preset = getShippopCarrierPreset(scCode);
+  if (!preset) {
+    throw new ApiError(400, "ขนส่งนี้ยังไม่อยู่ในรายการที่รองรับ SHIPPOP");
+  }
+
+  const expectedProviderCode = normalizeShippopCourierCode(preset.courierCode);
+  const actualProviderCode = providerCode?.trim()
+    ? normalizeShippopCourierCode(providerCode)
+    : expectedProviderCode;
+
+  if (actualProviderCode !== expectedProviderCode) {
+    throw new ApiError(400, `รหัส SHIPPOP ของ ${preset.name} ต้องเป็น ${expectedProviderCode}`);
+  }
+
+  return { preset, providerCode: expectedProviderCode };
+}
+
+function calculateCustomerShippingFee(providerPrice: number): number {
+  // providerPrice คือต้นทุนที่ SHIPPOP quote กลับมา
+  // ราคาที่คิดลูกค้า = max(ต้นทุน SHIPPOP + SHIPPOP_HANDLING_FEE, SHIPPOP_MIN_CUSTOMER_FEE)
+  // เช่น quote 30, handling 10, minimum 40 => ลูกค้าจ่าย 40
+  // เช่น quote 53, handling 10, minimum 40 => ลูกค้าจ่าย 63
+  const handlingFee = envMoney("SHIPPOP_HANDLING_FEE", 5);
+  const minimumFee = envMoney("SHIPPOP_MIN_CUSTOMER_FEE", 35);
+  return roundMoney(Math.max(providerPrice + handlingFee, minimumFee));
+}
+
 export async function listCarriers(): Promise<ShippingCarrier[]> {
+  await ensureShippingCarrierProviderColumn();
   const [rows] = await pool.query(
     "SELECT * FROM Shipping_carriers ORDER BY sc_id"
   );
@@ -25,7 +85,9 @@ export async function listCarriers(): Promise<ShippingCarrier[]> {
 }
 
 export async function createCarrier(input: CreateCarrierInput): Promise<number> {
+  await ensureShippingCarrierProviderColumn();
   const { sc_code, sc_name, calc_type, vol_divisor = null, tracking_url_template = null, is_active = 1 } = input;
+  const shippopConfig = resolveShippopCarrierConfig(sc_code, input.shippop_courier_code);
 
   if (calc_type === "CHARGEABLE_WEIGHT" && !vol_divisor) {
     throw new ApiError(400, "จำเป็นต้องระบุ vol_divisor สำหรับการคิดน้ำหนักเชิงปริมาตร");
@@ -40,10 +102,11 @@ export async function createCarrier(input: CreateCarrierInput): Promise<number> 
   }
 
   const [result] = await pool.query(
-    "INSERT INTO Shipping_carriers (sc_code, sc_name, calc_type, vol_divisor, tracking_url_template, is_active) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO Shipping_carriers (sc_code, sc_name, shippop_courier_code, calc_type, vol_divisor, tracking_url_template, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
     [
       sc_code.toUpperCase(),
       sc_name,
+      shippopConfig.providerCode,
       calc_type,
       calc_type === "WEIGHT_ONLY" ? null : vol_divisor,
       tracking_url_template?.trim() || null,
@@ -54,6 +117,7 @@ export async function createCarrier(input: CreateCarrierInput): Promise<number> 
 }
 
 export async function updateCarrier(scId: number, input: UpdateCarrierInput): Promise<void> {
+  await ensureShippingCarrierProviderColumn();
   const carrier = await findCarrierById(scId);
   if (!carrier) throw new ApiError(404, "ไม่พบข้อมูลขนส่ง");
 
@@ -69,6 +133,12 @@ export async function updateCarrier(scId: number, input: UpdateCarrierInput): Pr
 
   const newCalcType = input.calc_type ?? carrier.calc_type;
   const newVolDivisor = input.vol_divisor ?? carrier.vol_divisor;
+  const newScCode = input.sc_code ?? carrier.sc_code;
+  const newShippopCode = input.shippop_courier_code ?? carrier.shippop_courier_code;
+  const shouldUpdateShippopCode = input.sc_code !== undefined || input.shippop_courier_code !== undefined;
+  const shippopConfig = shouldUpdateShippopCode
+    ? resolveShippopCarrierConfig(newScCode, newShippopCode)
+    : null;
   if (newCalcType === "CHARGEABLE_WEIGHT" && !newVolDivisor) {
     throw new ApiError(400, "จำเป็นต้องระบุ vol_divisor สำหรับการคิดน้ำหนักเชิงปริมาตร");
   }
@@ -78,6 +148,10 @@ export async function updateCarrier(scId: number, input: UpdateCarrierInput): Pr
 
   if (input.sc_code !== undefined) { fields.push("sc_code = ?"); values.push(input.sc_code.toUpperCase()); }
   if (input.sc_name !== undefined) { fields.push("sc_name = ?"); values.push(input.sc_name); }
+  if (shippopConfig) {
+    fields.push("shippop_courier_code = ?");
+    values.push(shippopConfig.providerCode);
+  }
   if (input.calc_type !== undefined) { fields.push("calc_type = ?"); values.push(input.calc_type); }
   if (input.vol_divisor !== undefined) { fields.push("vol_divisor = ?"); values.push(input.vol_divisor); }
   // template นี้ใช้สร้าง tracking URL อัตโนมัติจากเลขพัสดุ เช่น https://track.example.com/{tracking_no}
@@ -135,6 +209,7 @@ export async function deleteCarrier(scId: number): Promise<void> {
 }
 
 async function findCarrierById(scId: number): Promise<ShippingCarrier | null> {
+  await ensureShippingCarrierProviderColumn();
   const [rows] = await pool.query(
     "SELECT * FROM Shipping_carriers WHERE sc_id = ?",
     [scId]
@@ -358,6 +433,7 @@ async function assertNoZoneOverlap(
 // ─── Calculator ───────────────────────────────────────────────────────────────
 
 export async function calculateShipping(input: CalculateInput): Promise<CalculateResult[]> {
+  await ensureShippingCarrierProviderColumn();
   const postcode = Number(input.postcode);
   const weightG = Number(input.weight_g);
 
@@ -376,28 +452,65 @@ export async function calculateShipping(input: CalculateInput): Promise<Calculat
   // rate table เดิมยังถูกใช้เป็น fallback เผื่อ SHIPPOP ล่ม/ยังไม่ได้ตั้ง API key/ต้องทดสอบใน local
   if (input.origin_postcode) {
     const shippopResults = await calculateShippopShipping(input, carriers as ShippingCarrier[]);
-    if (shippopResults.length > 0) return shippopResults;
+    if (shippopResults.length > 0) {
+      // console.log("[shipping] source=shippop", {
+      //   origin_postcode: input.origin_postcode,
+      //   postcode: input.postcode,
+      //   weight_g: input.weight_g,
+      //   options: shippopResults.map((option) => ({
+      //     sc_code: option.sc_code,
+      //     price: option.price,
+      //     provider_price: option.provider_price ?? null,
+      //     source: option.source,
+      //   })),
+      // });
+      return shippopResults;
+    }
   }
 
-  return calculateManualShipping(input, carriers as ShippingCarrier[]);
+  const manualResults = await calculateManualShipping(input, carriers as ShippingCarrier[]);
+  // console.log("[shipping] source=manual", {
+  //   reason: input.origin_postcode ? "shippop_unavailable_or_no_matching_carrier" : "missing_origin_postcode",
+  //   origin_postcode: input.origin_postcode ?? null,
+  //   postcode: input.postcode,
+  //   weight_g: input.weight_g,
+  //   options: manualResults.map((option) => ({
+  //     sc_code: option.sc_code,
+  //     price: option.price,
+  //     provider_price: option.provider_price ?? null,
+  //     source: option.source,
+  //   })),
+  // });
+  return manualResults;
 }
 
 async function calculateShippopShipping(input: CalculateInput, carriers: ShippingCarrier[]): Promise<CalculateResult[]> {
   const originPostcode = String(input.origin_postcode ?? "");
   const destinationPostcode = String(input.postcode ?? "");
-  const enabledCarrierByCode = new Map(carriers.map((carrier) => [carrier.sc_code.toUpperCase(), carrier]));
+  const enabledCarrierByCode = new Map(
+    carriers.map((carrier) => [
+      normalizeShippopCourierCode(carrier.shippop_courier_code ?? carrier.sc_code),
+      carrier,
+    ])
+  );
 
   try {
     const quotes = await quoteShippopRates({
       from: {
         name: "Origin",
-        address: "-",
+        address: input.origin_address?.trim() || "-",
+        district: input.origin_subdistrict?.trim() || "-",
+        state: input.origin_district?.trim() || "-",
+        province: input.origin_province?.trim() || "-",
         postcode: originPostcode,
         tel: "0000000000",
       },
       to: {
         name: "Destination",
-        address: "-",
+        address: input.destination_address?.trim() || "-",
+        district: input.destination_subdistrict?.trim() || "-",
+        state: input.destination_district?.trim() || "-",
+        province: input.destination_province?.trim() || "-",
         postcode: destinationPostcode,
         tel: "0000000000",
       },
@@ -409,6 +522,21 @@ async function calculateShippopShipping(input: CalculateInput, carriers: Shippin
         height: input.height_cm ?? 1,
       },
     });
+
+    // console.log("[shipping] shippop quotes", {
+    //   origin_postcode: originPostcode,
+    //   postcode: destinationPostcode,
+    //   weight_g: input.weight_g,
+    //   carrier_codes: carriers.map((carrier) => ({
+    //     db: carrier.sc_code,
+    //     shippop: normalizeShippopCourierCode(carrier.sc_code),
+    //   })),
+    //   quotes: quotes.map((quote) => ({
+    //     courierCode: quote.courierCode,
+    //     courierName: quote.courierName,
+    //     price: quote.price,
+    //   })),
+    // });
 
     return quotes
       .flatMap((quote): CalculateResult[] => {
@@ -422,12 +550,19 @@ async function calculateShippopShipping(input: CalculateInput, carriers: Shippin
           calc_type: carrier.calc_type,
           billed_weight_g: Math.ceil(Number(input.weight_g)),
           zone_code: "SHIPPOP",
-          price: quote.price,
+          price: calculateCustomerShippingFee(quote.price),
+          provider_price: quote.price,
           is_active: carrier.is_active,
           source: "shippop" as const,
         }];
       });
   } catch (err) {
+    // console.warn("[shipping] shippop quote failed, fallback enabled", {
+    //   message: err instanceof Error ? err.message : String(err),
+    //   origin_postcode: input.origin_postcode ?? null,
+    //   postcode: input.postcode,
+    //   weight_g: input.weight_g,
+    // });
     if (process.env.SHIPPOP_RATE_FALLBACK !== "false") return [];
     throw err;
   }

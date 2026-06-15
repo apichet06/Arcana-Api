@@ -43,6 +43,14 @@ export type OrderShipmentItemDTO = {
     qty: number;
 };
 
+export type ShipmentEventDTO = {
+    status?: string | null;
+    title: string;
+    description?: string | null;
+    location?: string | null;
+    occurred_at: string;
+};
+
 export type OrderShipmentDTO = {
     os_id: number;
     or_id: number;
@@ -70,6 +78,7 @@ export type OrderShipmentDTO = {
     item_count: number;
     total_qty: number;
     items?: OrderShipmentItemDTO[];
+    events?: ShipmentEventDTO[];
 };
 
 export type OrderDTO = {
@@ -92,6 +101,7 @@ export type OrderDTO = {
     subtotal: number;
     discount_total: number;
     shipping_fee: number;
+    provider_shipping_cost?: number | null;
     shipping_sc_id?: number | null;
     shipping_carrier_code?: string | null;
     shipping_carrier_name?: string | null;
@@ -101,6 +111,7 @@ export type OrderDTO = {
     label_url?: string | null;
     tracking_url_template?: string | null;
     shipment_status?: string | null;
+    shipment_events?: ShipmentEventDTO[];
     grand_total: number;
     coupon_code: string | null;
     shipping_name: string;
@@ -301,6 +312,7 @@ export type AdminPendingPayoutRowDTO = {
     st_number: string | null;
     st_company_name: string | null;
     omise_recipient_id: string | null;
+    payout_enabled: number;
     bk_name: string | null;
     bank_account_number: string | null;
     order_count: number;
@@ -315,6 +327,39 @@ export type AdminPendingPayoutRowDTO = {
     earliest_sale_date: string | null;
     latest_sale_date: string | null;
     next_payout_date: string | null;
+};
+
+export type AdminTransferResultDTO = {
+    st_id: number;
+    st_company_name: string | null;
+    omise_transfer_id: string;
+    amount: number;
+    currency: string;
+};
+
+export type AdminToggleStorePayoutDTO = {
+    st_id: number;
+    payout_enabled: boolean;
+};
+
+export type AdminPayoutHistoryRowDTO = {
+    ph_id: number;
+    st_id: number;
+    st_company_name: string | null;
+    omise_transfer_id: string;
+    omise_recipient_id: string;
+    amount: number;
+    currency: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+};
+
+export type AdminPayoutHistoryDTO = {
+    rows: AdminPayoutHistoryRowDTO[];
+    total: number;
+    page: number;
+    page_size: number;
 };
 
 export type AdminPendingPayoutSummaryDTO = {
@@ -334,6 +379,14 @@ export type AdminPendingPayoutReportDTO = {
     setting: AdminPayoutSettingDTO;
     summary: AdminPendingPayoutSummaryDTO;
     rows: AdminPendingPayoutRowDTO[];
+};
+
+export type AdminPayoutBadgeSummaryDTO = {
+    due_stores: number;
+    pending_transfers: number;
+    sent_transfers: number;
+    paid_transfers: number;
+    failed_transfers: number;
 };
 
 export type OrderDetailDTO = OrderDTO & {

@@ -36,6 +36,9 @@ import { couponRouter } from "./modules/coupons/coupon.routes.js";
 import { shippingRouter } from "./modules/shipping/shipping.routes.js";
 import { paymentRouter } from "./modules/payments/payment.routes.js";
 import { statusRouters } from "./modules/statuses/statuses.routes.js";
+import { webhookRouter } from "./modules/webhooks/webhook.routes.js"
+import { websiteThemeRouter } from "./modules/website-theme/website-theme.routes.js";
+import { articleRouter } from "./modules/articles/articles.routes.js";
 
 
 export function createApp() {
@@ -100,6 +103,9 @@ export function createApp() {
     app.use("/api/shipping", shippingRouter)
     app.use("/api/payments", paymentRouter)
     app.use("/api/statuses", statusRouters)
+    app.use("/api/webhooks", webhookRouter)
+    app.use("/api/website-theme", websiteThemeRouter)
+    app.use("/api/articles", articleRouter)
 
     app.get('/', (_req, res) => {
         res.status(200).send("Arcana API is running");

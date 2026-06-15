@@ -77,9 +77,10 @@ export const getOrders = asyncHandler(async (req, res) => {
 
 export const adminGetOrders = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
+    const lg_code = getRequestLanguage(req.query.lg_code);
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
 
-    const orders = await service.adminGetOrders(st_id);
+    const orders = await service.adminGetOrders(st_id, lg_code);
     res.status(200).json({ data: orders });
 });
 
@@ -180,14 +181,62 @@ export const adminUpdatePayoutSetting = asyncHandler(async (req, res) => {
     res.status(200).json({ data: setting, message: "อัปเดตรอบจ่ายสำเร็จ" });
 });
 
+export const adminGetPayoutHistory = asyncHandler(async (req, res) => {
+    const st_id = req.query.st_id ? Number(req.query.st_id) : undefined;
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
+    const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
+    const page = req.query.page ? Number(req.query.page) : undefined;
+    const page_size = req.query.page_size ? Number(req.query.page_size) : undefined;
+
+    const result = await service.adminGetPayoutHistory({
+        ...(st_id !== undefined ? { st_id } : {}),
+        ...(status !== undefined ? { status } : {}),
+        ...(start_date !== undefined ? { start_date } : {}),
+        ...(end_date !== undefined ? { end_date } : {}),
+        ...(page !== undefined ? { page } : {}),
+        ...(page_size !== undefined ? { page_size } : {}),
+    });
+    res.status(200).json({ data: result });
+});
+
+export const adminGetLatestTransferPerStore = asyncHandler(async (_req, res) => {
+    const result = await service.adminGetLatestTransferPerStore();
+    res.status(200).json({ data: result });
+});
+
+export const adminGetPayoutBadgeSummary = asyncHandler(async (_req, res) => {
+    const result = await service.adminGetPayoutBadgeSummary();
+    res.status(200).json({ data: result });
+});
+
+export const adminExecuteTransfer = asyncHandler(async (req, res) => {
+    const st_id = Number(req.body?.st_id);
+    if (!st_id || isNaN(st_id)) throw new ApiError(400, "st_id ไม่ถูกต้อง");
+
+    const result = await service.adminExecuteTransfer(st_id);
+    res.status(200).json({ data: result, message: "โอนเงินสำเร็จ" });
+});
+
+export const adminToggleStorePayout = asyncHandler(async (req, res) => {
+    const st_id = Number(req.params.st_id);
+    const { enabled } = req.body ?? {};
+    if (!st_id || isNaN(st_id)) throw new ApiError(400, "st_id ไม่ถูกต้อง");
+    if (typeof enabled !== "boolean") throw new ApiError(400, "enabled ต้องเป็น true หรือ false");
+
+    const result = await service.adminToggleStorePayout(st_id, enabled);
+    res.status(200).json({ data: result });
+});
+
 export const adminGetOrderById = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
 
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
 
-    const order = await service.adminGetOrderById(or_id, st_id);
+    const order = await service.adminGetOrderById(or_id, st_id, lg_code);
     if (!order) throw new ApiError(404, "ไม่พบ order");
 
     res.status(200).json({ data: order });
@@ -196,18 +245,58 @@ export const adminGetOrderById = asyncHandler(async (req, res) => {
 export const adminApproveRefund = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const note = typeof req.body?.note === "string" ? req.body.note : "";
 
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
 
-    const order = await service.approveRefundRequest(or_id, st_id, note);
-    res.status(200).json({ data: order, message: "อนุมัติคืนเงินสำเร็จ" });
+    const order = await service.approveRefundRequest(or_id, st_id, note, lg_code);
+    const needsManualRefund = order.refund_status === "failed" && Boolean(order.refund_remark?.includes("ต้องโอนคืน"));
+    res.status(200).json({
+        data: order,
+        message: needsManualRefund
+            ? "Omise คืนเงินให้อัตโนมัติไม่ได้ กรุณาโอนคืนลูกค้าด้วยตนเอง"
+            : "อนุมัติคืนเงินสำเร็จ",
+    });
+});
+
+export const adminConfirmManualRefund = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
+    const note = typeof req.body?.note === "string" ? req.body.note : "";
+
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+    if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
+
+    const order = await service.confirmManualRefundRequest(or_id, st_id, note, lg_code);
+    res.status(200).json({ data: order, message: "ยืนยันการโอนคืนลูกค้าแล้ว" });
+});
+
+export const adminConfirmReturnReceived = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
+    const note = typeof req.body?.note === "string" ? req.body.note : "";
+
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+    if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
+
+    const order = await service.confirmReturnReceived(or_id, st_id, note, lg_code);
+    const needsManualRefund = order.refund_status === "failed" && Boolean(order.refund_remark?.includes("ต้องโอนคืน"));
+    res.status(200).json({
+        data: order,
+        message: needsManualRefund
+            ? "รับสินค้าคืนแล้ว แต่ Omise คืนเงินอัตโนมัติไม่ได้ กรุณาโอนคืนลูกค้าด้วยตนเอง"
+            : "ยืนยันรับสินค้าคืนและคืนเงินสำเร็จ",
+    });
 });
 
 export const adminUpdateStatus = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const statusCode = String(req.body?.status_code ?? "");
     const note = typeof req.body?.note === "string" ? req.body.note : "";
 
@@ -217,7 +306,7 @@ export const adminUpdateStatus = asyncHandler(async (req, res) => {
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
     if (!allowedStatusCodes.includes(statusCode)) throw new ApiError(400, "สถานะที่ต้องการเปลี่ยนไม่ถูกต้อง");
 
-    const order = await service.adminUpdateOrderStatus(or_id, st_id, statusCode as OrderStatusCode, note);
+    const order = await service.adminUpdateOrderStatus(or_id, st_id, statusCode as OrderStatusCode, note, lg_code);
     const message =
         statusCode === "READY_TO_SHIP"
             ? "พร้อมส่งออกแล้ว ระบบสร้าง shipment ให้เรียบร้อย และยังสามารถแก้ไขเลขพัสดุได้"
@@ -228,38 +317,56 @@ export const adminUpdateStatus = asyncHandler(async (req, res) => {
 export const adminUpdateTracking = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const trackingNo = typeof req.body?.tracking_no === "string" ? req.body.tracking_no : "";
 
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
 
-    const order = await service.adminUpdateOrderTracking(or_id, st_id, trackingNo);
+    const order = await service.adminUpdateOrderTracking(or_id, st_id, trackingNo, lg_code);
     res.status(200).json({ data: order, message: "บันทึกเลขพัสดุสำเร็จ" });
 });
 
 export const adminCreateShipment = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
 
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
 
-    const order = await service.adminCreateOrderShipment(or_id, st_id);
+    const order = await service.adminCreateOrderShipment(or_id, st_id, lg_code);
     res.status(200).json({
         data: order,
         message: "พร้อมส่งออกแล้ว ระบบสร้าง shipment ให้เรียบร้อย และยังสามารถแก้ไขเลขพัสดุได้",
     });
 });
 
+export const adminDevMarkDelivered = asyncHandler(async (req, res) => {
+    const st_id = Number(req.storeId);
+    const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
+
+    if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
+    if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
+
+    const order = await service.adminDevMarkOrderDelivered(or_id, st_id, lg_code);
+    res.status(200).json({
+        data: order,
+        message: "จำลองจัดส่งสำเร็จแล้ว",
+    });
+});
+
 export const adminRejectRefund = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const note = typeof req.body?.note === "string" ? req.body.note : "";
 
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
 
-    const order = await service.rejectRefundRequest(or_id, st_id, note);
+    const order = await service.rejectRefundRequest(or_id, st_id, note, lg_code);
     res.status(200).json({ data: order, message: "ปฏิเสธคำขอคืนเงินแล้ว" });
 });
 
@@ -291,16 +398,31 @@ export const cancelOrder = asyncHandler(async (req, res) => {
     res.status(200).json({ data: order, message: "ยกเลิกคำสั่งซื้อสำเร็จ" });
 });
 
+export const confirmOrderReceived = asyncHandler(async (req, res) => {
+    const u_id = req.userId;
+    const or_id = Number(req.params.or_id);
+    const lg_code = getRequestLanguage(req.query.lg_code);
+
+    if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
+    if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
+
+    const order = await service.confirmOrderReceived(or_id, u_id, lg_code);
+    res.status(200).json({ data: order, message: "ยืนยันรับสินค้าสำเร็จ" });
+});
+
 export const requestRefund = asyncHandler(async (req, res) => {
     const u_id = req.userId;
     const or_id = Number(req.params.or_id);
     const lg_code = getRequestLanguage(req.query.lg_code);
     const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    const returnTracking = typeof req.body?.return_tracking === "string" ? req.body.return_tracking.trim() : "";
+    const imageFiles = (req.files as Express.Multer.File[]) ?? [];
 
     if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
     if (!or_id || isNaN(or_id)) throw new ApiError(400, "or_id ไม่ถูกต้อง");
     if (reason.length < 5) throw new ApiError(400, "กรุณาระบุเหตุผลในการขอคืนเงิน");
+    if (imageFiles.length > 3) throw new ApiError(400, "แนบรูปถ่ายได้สูงสุด 3 รูป");
 
-    const order = await service.requestRefund(or_id, u_id, reason, lg_code);
+    const order = await service.requestRefund(or_id, u_id, reason, lg_code, returnTracking, imageFiles);
     res.status(201).json({ data: order, message: "ส่งคำขอคืนเงินแล้ว" });
 });

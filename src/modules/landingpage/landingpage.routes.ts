@@ -5,7 +5,13 @@ import * as controller from "./landingpage.controller.js";
 
 export const landingPageRouter = Router();
 
-const upload = multer({ dest: "public/uploads/" });
+const upload = multer({
+    dest: "public/uploads/",
+    limits: {
+        fieldSize: 20 * 1024 * 1024,
+        fileSize: 5 * 1024 * 1024,
+    },
+});
 landingPageRouter.get("/slug", controller.GetLandingPagesluge);
 
 landingPageRouter.get("/slug/:slug", controller.GetUniqueSlug);

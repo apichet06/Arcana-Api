@@ -196,10 +196,32 @@ export async function getProductShop({
                 f.b_name,
                 g.st_id,
                 g.st_company_name, 
-                CASE 
+                CASE
                     WHEN MIN(d.pv_price) = MAX(d.pv_price) THEN 0
                     ELSE 1
-                END AS has_price_range
+                END AS has_price_range,
+                (
+                    SELECT ROUND(AVG(ed.product_score), 1)
+                    FROM Estimate_delivery ed
+                    INNER JOIN ProductVariants pv ON pv.pv_id = ed.pv_id
+                    WHERE pv.p_id = a.p_id
+                ) AS avg_rating,
+                (
+                    SELECT COUNT(*)
+                    FROM Estimate_delivery ed
+                    INNER JOIN ProductVariants pv ON pv.pv_id = ed.pv_id
+                    WHERE pv.p_id = a.p_id
+                ) AS review_count,
+                IF(
+                    COALESCE((
+                        SELECT SUM(inv.on_hand) - SUM(inv.reserved_qty)
+                        FROM Inventorys inv
+                        INNER JOIN ProductVariants pv ON pv.pv_id = inv.pv_id
+                        WHERE pv.p_id = a.p_id
+                    ), 0) <= 0,
+                    1,
+                    0
+                ) AS is_out_of_stock
             FROM Products a
             INNER JOIN ProductLangs b 
                 ON a.p_id = b.p_id

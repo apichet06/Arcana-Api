@@ -7,8 +7,14 @@ export type OrderStatusCode =
     | "PROCESSING"
     | "PACKED"
     | "READY_TO_SHIP"
+    | "DELIVERED"
+    | "RECEIVED"
+    | "AUTO_RECEIVED"
+    | "REVIEWED"
     | "CANCELLED"
-    | "REFUNDED";
+    | "REFUNDED"
+    | "RETURN_REQUESTED"
+    | "RETURN_REQUESTED_COMPLETED";
 
 const LEGACY_STATUS_BY_CODE: Record<OrderStatusCode, string> = {
     PENDING: "pending",
@@ -16,8 +22,14 @@ const LEGACY_STATUS_BY_CODE: Record<OrderStatusCode, string> = {
     PROCESSING: "packing",
     PACKED: "packing",
     READY_TO_SHIP: "shipped",
+    DELIVERED: "delivered",
+    RECEIVED: "completed",
+    AUTO_RECEIVED: "completed",
+    REVIEWED: "reviewed",
     CANCELLED: "cancelled",
     REFUNDED: "refunded",
+    RETURN_REQUESTED: "refunded",
+    RETURN_REQUESTED_COMPLETED: "refunded",
 };
 
 export const BUYER_PAYABLE_STATUS_CODES: OrderStatusCode[] = ["PENDING"];

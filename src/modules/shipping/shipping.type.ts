@@ -4,6 +4,7 @@ export interface ShippingCarrier {
   sc_id: number;
   sc_code: string;
   sc_name: string;
+  shippop_courier_code: string | null;
   calc_type: CalcType;
   vol_divisor: number | null;
   tracking_url_template: string | null;
@@ -32,6 +33,7 @@ export interface PostcodeZoneRule {
 export interface CreateCarrierInput {
   sc_code: string;
   sc_name: string;
+  shippop_courier_code?: string | null;
   calc_type: CalcType;
   vol_divisor?: number | null;
   tracking_url_template?: string | null;
@@ -69,16 +71,26 @@ export interface CalculateInput {
   width_cm?: number;
   height_cm?: number;
   origin_postcode?: string;
+  origin_address?: string | null;
+  origin_province?: string | null;
+  origin_district?: string | null;
+  origin_subdistrict?: string | null;
+  destination_address?: string | null;
+  destination_province?: string | null;
+  destination_district?: string | null;
+  destination_subdistrict?: string | null;
 }
 
 export interface CalculateResult {
   sc_id: number;
   sc_code: string;
   sc_name: string;
+  shippop_courier_code?: string | null;
   calc_type: CalcType;
   billed_weight_g: number;
   zone_code: string;
   price: number | null;
+  provider_price?: number | null;
   is_active: number;
   source?: "shippop" | "manual";
 }

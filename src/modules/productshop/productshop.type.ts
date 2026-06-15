@@ -14,6 +14,9 @@ export type ProductShopDTO = {
     b_id: number
     b_name: string
     has_price_range: 0 | 1
+    avg_rating: number | null
+    review_count: number
+    is_out_of_stock: 0 | 1
     tags: {
         ptag_id: number
         ptag_name: string

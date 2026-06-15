@@ -5,8 +5,11 @@ export async function translateProductFields(
     texts: string[]
 ): Promise<{ th: string[]; en: string[]; ja: string[] }> {
     const cleanTexts = texts.map((text) => (text ?? "").trim());
+    const nonEmptyItems = cleanTexts
+        .map((text, index) => ({ text, index }))
+        .filter((item) => item.text.length > 0);
 
-    if (cleanTexts.every((text) => !text)) {
+    if (nonEmptyItems.length === 0) {
         return {
             th: cleanTexts,
             en: cleanTexts.map(() => ""),
@@ -31,14 +34,29 @@ export async function translateProductFields(
         preserveFormatting: true,
     };
 
+    const textsToTranslate = nonEmptyItems.map((item) => item.text);
+
     const [enRes, jaRes] = await Promise.all([
-        translator.translateText(cleanTexts, null, EN, options),
-        translator.translateText(cleanTexts, null, JA, options),
+        translator.translateText(textsToTranslate, null, EN, options),
+        translator.translateText(textsToTranslate, null, JA, options),
     ]);
+
+    const en = cleanTexts.map(() => "");
+    const ja = cleanTexts.map(() => "");
+
+    enRes.forEach((result: any, translatedIndex: number) => {
+        const originalIndex = nonEmptyItems[translatedIndex]?.index;
+        if (originalIndex !== undefined) en[originalIndex] = result.text;
+    });
+
+    jaRes.forEach((result: any, translatedIndex: number) => {
+        const originalIndex = nonEmptyItems[translatedIndex]?.index;
+        if (originalIndex !== undefined) ja[originalIndex] = result.text;
+    });
 
     return {
         th: cleanTexts,
-        en: enRes.map((r: any) => r.text),
-        ja: jaRes.map((r: any) => r.text),
+        en,
+        ja,
     };
 }

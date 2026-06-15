@@ -120,6 +120,7 @@ export async function getCart(u_id: number, lg_code = "th"): Promise<CartDTO> {
                     SEPARATOR ' | '
                 ) AS variant_label,
                 p.p_id,
+                p.ctl_id,
                 p.st_id,
                 s.st_company_name,
                 pl.p_name
@@ -139,7 +140,7 @@ export async function getCart(u_id: number, lg_code = "th"): Promise<CartDTO> {
             GROUP BY
                 ci.ci_id, ci.cart_id, ci.pv_id, ci.qty,
                 ci.unit_price, ci.discount_amount, ci.line_total, ci.is_selected,
-                pv.pv_sku, pv.image_url, ip.ip_image_url, p.p_id, p.st_id, s.st_company_name, pl.p_name
+                pv.pv_sku, pv.image_url, ip.ip_image_url, p.p_id, p.ctl_id, p.st_id, s.st_company_name, pl.p_name
             ORDER BY ci.ci_id ASC`,
             [lg_code, cartId]
         );

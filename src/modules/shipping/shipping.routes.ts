@@ -4,6 +4,9 @@ import * as ctrl from "./shipping.controller.js";
 
 export const shippingRouter = Router();
 
+// SHIPPOP official label is fetched server-side because SHIPPOP requires the API key.
+shippingRouter.get("/labels/:tracking_code", ctrl.openShippopLabel);
+
 // ─── Carriers ────────────────────────────────────────────────────────────────
 shippingRouter.get("/carriers", Auth, ctrl.listCarriers);
 shippingRouter.post("/carriers", Auth, ctrl.createCarrier);

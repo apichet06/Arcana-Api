@@ -27,7 +27,15 @@ export async function listCategorys(): Promise<CategoryDTO[]> {
     return rows;
 }
 
-export async function getCategoryByLgCode(lg_code: string,): Promise<CategoryDTO[]> {
+export async function getCategoryByLgCode(lg_code: string, ctl_id?: number): Promise<CategoryDTO[]> {
+    const whereConditions = ["b.lg_code = ?"];
+    const queryParams: Array<string | number> = [lg_code];
+
+    if (ctl_id && ctl_id > 0) {
+        whereConditions.push("a.ctl_id = ?");
+        queryParams.push(ctl_id);
+    }
+
     const [rows] = await pool.query<(RowDataPacket & CategoryDTO)[]>(`
     SELECT
       a.c_id,b.cl_id, a.c_sort_order, a.e_id, a.ctl_id,
@@ -37,9 +45,9 @@ export async function getCategoryByLgCode(lg_code: string,): Promise<CategoryDTO
     INNER JOIN CategoryLangs b ON a.c_id = b.c_id
     INNER JOIN Catalog c ON a.ctl_id = c.ctl_id
     INNER JOIN Employees d ON a.e_id = d.e_id
-    WHERE b.lg_code = ?
+    WHERE ${whereConditions.join(" AND ")}
     ORDER BY b.cl_id, b.lg_code desc 
-    `, [lg_code]);
+    `, queryParams);
     return rows;
 }
 

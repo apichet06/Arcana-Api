@@ -23,6 +23,17 @@ export type ConversationWithBuyerDTO = ConversationDTO & {
     target_store_id?: number | null
     is_contact?: boolean
     last_message: string | null
+    last_message_type: MessageType | null
+    last_message_at: Date | null
+    unread_count: number
+}
+
+export type ConversationWithStoreDTO = ConversationDTO & {
+    store_name: string
+    store_email: string | null
+    store_image: string | null
+    last_message: string | null
+    last_message_type: MessageType | null
     last_message_at: Date | null
     unread_count: number
 }

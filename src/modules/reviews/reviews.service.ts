@@ -2,6 +2,7 @@ import type { ResultSetHeader, RowDataPacket } from "mysql2/promise"
 import { pool } from "../../db/pool.js"
 import { ApiError } from "../../shared/errors/ApiError.js"
 import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js"
+import { setOrdersStatus } from "../orders/order-status.service.js"
 import type { CreateReviewInput, ReviewDTO, ReviewSummary } from "./reviews.type.js"
 
 // ดึงรีวิวทั้งหมดของ pv_id พร้อม pagination
@@ -59,11 +60,18 @@ export async function getReviews(
 // สร้างรีวิวใหม่ (ต้องซื้อสินค้านั้นจริงๆ)
 export async function createReview(input: CreateReviewInput): Promise<void> {
     // ตรวจว่า oi_id นั้นเป็นของ user นี้และมี pv_id ตรงกัน
+    // เช็ค 3 ทางเพราะ delivered อาจมาจาก: legacy status, shipment_status จาก SHIPPOP, หรือ s_code ใหม่
     const [orderCheck] = await pool.query<RowDataPacket[]>(
         `SELECT oi.oi_id
          FROM Order_items oi
          JOIN Orders o ON o.or_id = oi.or_id
-         WHERE oi.oi_id = ? AND oi.pv_id = ? AND o.u_id = ? AND o.status = 'delivered'
+         LEFT JOIN Status os ON os.s_id = o.s_id
+         WHERE oi.oi_id = ? AND oi.pv_id = ? AND o.u_id = ?
+           AND (
+               o.status IN ('delivered', 'reviewed')
+               OR o.shipment_status = 'delivered'
+               OR os.s_code IN ('DELIVERED', 'REVIEWED')
+           )
          LIMIT 1`,
         [input.oi_id, input.pv_id, input.u_id]
     )
@@ -105,6 +113,39 @@ export async function createReview(input: CreateReviewInput): Promise<void> {
         }
 
         await conn.commit()
+
+        // หลัง commit — เช็คว่า order นี้รีวิวครบทุก item แล้วหรือยัง
+        // ถ้าครบให้เปลี่ยนสถานะ order เป็น REVIEWED
+        const [orRows] = await conn.query<(RowDataPacket & { or_id: number })[]>(
+            "SELECT or_id FROM Order_items WHERE oi_id = ? LIMIT 1",
+            [input.oi_id]
+        )
+        const or_id = orRows[0]?.or_id
+        if (or_id) {
+            const [reviewProgress] = await conn.query<(RowDataPacket & {
+                total_items: number;
+                reviewed_items: number;
+            })[]>(
+                `SELECT COUNT(oi.oi_id) AS total_items,
+                        COUNT(ed.ed_id)  AS reviewed_items
+                 FROM Order_items oi
+                 LEFT JOIN Estimate_delivery ed ON ed.oi_id = oi.oi_id
+                 WHERE oi.or_id = ?`,
+                [or_id]
+            )
+            const progress = reviewProgress[0]
+            if (progress && progress.total_items > 0 && progress.total_items === progress.reviewed_items) {
+                // ทุก item รีวิวครบ — update order เป็น REVIEWED
+                await conn.beginTransaction()
+                try {
+                    await setOrdersStatus(conn, [or_id], "REVIEWED")
+                    await conn.commit()
+                } catch {
+                    await conn.rollback()
+                    // ไม่ throw — review บันทึกสำเร็จแล้ว แค่ status อัพไม่ได้
+                }
+            }
+        }
     } catch (err) {
         await conn.rollback()
         throw err

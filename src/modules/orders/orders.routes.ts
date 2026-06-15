@@ -1,7 +1,10 @@
 import { Router } from "express";
+import multer from "multer";
 import { BuyerAuth } from "../../shared/middlewares/buyerAuth.js";
 import { Auth } from "../../shared/middlewares/auth.js";
 import * as controller from "./orders.controller.js";
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 export const orderRouter = Router();
 
@@ -17,14 +20,23 @@ orderRouter.get("/admin/reports/sales-by-vendor", Auth, controller.adminGetSales
 orderRouter.get("/admin/reports/pending-payout", Auth, controller.adminGetPendingPayoutReport);
 orderRouter.get("/admin/payout-setting", Auth, controller.adminGetPayoutSetting);
 orderRouter.patch("/admin/payout-setting", Auth, controller.adminUpdatePayoutSetting);
+orderRouter.post("/admin/payout/transfer", Auth, controller.adminExecuteTransfer);
+orderRouter.patch("/admin/payout/store/:st_id/toggle", Auth, controller.adminToggleStorePayout);
+orderRouter.get("/admin/payout/history", Auth, controller.adminGetPayoutHistory);
+orderRouter.get("/admin/payout/history/latest", Auth, controller.adminGetLatestTransferPerStore);
+orderRouter.get("/admin/payout/badge-summary", Auth, controller.adminGetPayoutBadgeSummary);
 orderRouter.patch("/admin/:or_id/status", Auth, controller.adminUpdateStatus);
 orderRouter.patch("/admin/:or_id/tracking", Auth, controller.adminUpdateTracking);
 orderRouter.post("/admin/:or_id/shipment", Auth, controller.adminCreateShipment);
+orderRouter.post("/admin/:or_id/dev/delivered", Auth, controller.adminDevMarkDelivered);
 orderRouter.patch("/admin/:or_id/refund/approve", Auth, controller.adminApproveRefund);
+orderRouter.patch("/admin/:or_id/refund/manual-confirm", Auth, controller.adminConfirmManualRefund);
 orderRouter.patch("/admin/:or_id/refund/reject", Auth, controller.adminRejectRefund);
+orderRouter.post("/admin/:or_id/return/confirm-received", Auth, controller.adminConfirmReturnReceived);
 orderRouter.get("/admin/:or_id", Auth, controller.adminGetOrderById);
 orderRouter.get("/admin", Auth, controller.adminGetOrders);
 orderRouter.get("/", BuyerAuth, controller.getOrders);
+orderRouter.patch("/:or_id/received", BuyerAuth, controller.confirmOrderReceived);
 orderRouter.patch("/:or_id/cancel", BuyerAuth, controller.cancelOrder);
-orderRouter.post("/:or_id/refund-request", BuyerAuth, controller.requestRefund);
+orderRouter.post("/:or_id/refund-request", BuyerAuth, upload.array("images", 3), controller.requestRefund);
 orderRouter.get("/:or_id", BuyerAuth, controller.getOrderById);
