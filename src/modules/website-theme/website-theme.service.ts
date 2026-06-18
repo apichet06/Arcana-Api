@@ -1,3 +1,5 @@
+import fs from "fs"
+import path from "path"
 import { pool } from "../../db/pool.js"
 import { ApiError } from "../../shared/errors/ApiError.js"
 import type {
@@ -13,6 +15,11 @@ import type {
 let heroTablesReady: Promise<void> | null = null
 let themeColumnsReady: Promise<void> | null = null
 
+type CleanupResult = {
+    deleted: string[]
+    failed: { path: string; message: string }[]
+}
+
 function parseJsonArray(value: unknown): string[] {
     if (!value) return []
     if (Array.isArray(value)) return value as string[]
@@ -25,6 +32,101 @@ function normalizeSlide(row: any): WebsiteHeroSlide {
         ...row,
         is_active: Boolean(row.is_active),
     }
+}
+
+function normalizeUploadPath(value: string | null | undefined): string | null {
+    if (!value || /^(data:|blob:|https?:\/\/)/i.test(value)) return null
+
+    const cleaned = value.replace(/\\/g, "/").replace(/^\/+/, "")
+    const normalized = path.posix.normalize(cleaned)
+    if (!normalized.startsWith("uploads/theme/") && !normalized.startsWith("uploads/hero/")) {
+        return null
+    }
+
+    return normalized
+}
+
+function uniqueUploadPaths(paths: Array<string | null | undefined>): string[] {
+    return [...new Set(paths.map(normalizeUploadPath).filter((value): value is string => Boolean(value)))]
+}
+
+function getUploadRoot() {
+    return path.resolve(process.cwd(), "public", "uploads")
+}
+
+function getPublicFilePath(uploadPath: string): string | null {
+    const fullPath = path.resolve(process.cwd(), "public", uploadPath)
+    const uploadRoot = getUploadRoot()
+
+    if (fullPath !== uploadRoot && fullPath.startsWith(`${uploadRoot}${path.sep}`)) {
+        return fullPath
+    }
+
+    return null
+}
+
+async function collectReferencedWebsiteImagePaths(): Promise<Set<string>> {
+    await ensureThemeColumns()
+    await ensureHeroTables()
+
+    const refs = new Set<string>()
+    const queries = [
+        "SELECT bg_image_url AS image_url FROM website_theme WHERE bg_image_url IS NOT NULL",
+        "SELECT hero_bg_image_url AS image_url FROM website_hero_settings WHERE hero_bg_image_url IS NOT NULL",
+        "SELECT image_url FROM website_hero_slides WHERE image_url IS NOT NULL",
+    ]
+
+    for (const query of queries) {
+        const [rows] = await pool.query<any[]>(query)
+        for (const row of rows) {
+            const uploadPath = normalizeUploadPath(row.image_url)
+            if (uploadPath) refs.add(uploadPath)
+        }
+    }
+
+    return refs
+}
+
+async function deleteUnreferencedPaths(paths: string[]): Promise<CleanupResult> {
+    const referenced = await collectReferencedWebsiteImagePaths()
+    const result: CleanupResult = { deleted: [], failed: [] }
+
+    for (const uploadPath of uniqueUploadPaths(paths)) {
+        if (referenced.has(uploadPath)) continue
+
+        const fullPath = getPublicFilePath(uploadPath)
+        if (!fullPath) continue
+
+        try {
+            if (fs.existsSync(fullPath)) {
+                fs.unlinkSync(fullPath)
+                result.deleted.push(uploadPath)
+            }
+        } catch (error) {
+            result.failed.push({
+                path: uploadPath,
+                message: error instanceof Error ? error.message : String(error),
+            })
+        }
+    }
+
+    return result
+}
+
+function listFilesRecursive(dir: string): string[] {
+    if (!fs.existsSync(dir)) return []
+
+    const files: string[] = []
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+            files.push(...listFilesRecursive(fullPath))
+        } else if (entry.isFile()) {
+            files.push(fullPath)
+        }
+    }
+
+    return files
 }
 
 async function ensureThemeColumns(): Promise<void> {
@@ -139,6 +241,8 @@ export async function upsertTheme(websiteKey: WebsiteKey, input: UpsertThemeInpu
         throw new ApiError(400, "ต้องระบุ URL รูปภาพ")
     }
 
+    const current = await getTheme(websiteKey)
+
     await pool.query(
         `INSERT INTO website_theme (
              website_key,
@@ -170,6 +274,10 @@ export async function upsertTheme(websiteKey: WebsiteKey, input: UpsertThemeInpu
             input.footer_font_color?.trim() || null,
         ]
     )
+
+    if (current?.bg_image_url && current.bg_image_url !== input.bg_image_url) {
+        await deleteUnreferencedPaths([current.bg_image_url])
+    }
 }
 
 export async function getHeroBackground(websiteKey: WebsiteKey): Promise<WebsiteHeroBackground | null> {
@@ -201,6 +309,8 @@ export async function upsertHeroBackground(
         throw new ApiError(400, "ต้องระบุ URL รูปภาพพื้นหลัง Header Hero")
     }
 
+    const current = await getHeroBackground(websiteKey)
+
     await pool.query(
         `INSERT INTO website_hero_settings (website_key, hero_bg_type, hero_bg_colors, hero_bg_image_url)
          VALUES (?, ?, ?, ?)
@@ -215,6 +325,10 @@ export async function upsertHeroBackground(
             input.hero_bg_image_url ?? null,
         ]
     )
+
+    if (current?.hero_bg_image_url && current.hero_bg_image_url !== input.hero_bg_image_url) {
+        await deleteUnreferencedPaths([current.hero_bg_image_url])
+    }
 }
 
 export async function getHeroSlides(
@@ -247,6 +361,7 @@ export async function upsertHeroSlides(
         throw new ApiError(400, "ทุก slide ต้องมีรูปภาพ")
     }
 
+    const currentSlides = await getHeroSlides(websiteKey)
     const conn = await pool.getConnection()
     try {
         await conn.beginTransaction()
@@ -272,10 +387,32 @@ export async function upsertHeroSlides(
         }
 
         await conn.commit()
+
+        const nextImageUrls = new Set(uniqueUploadPaths(slides.map((slide) => slide.image_url)))
+        const removedImageUrls = currentSlides
+            .map((slide) => slide.image_url)
+            .filter((imageUrl) => {
+                const uploadPath = normalizeUploadPath(imageUrl)
+                return uploadPath && !nextImageUrls.has(uploadPath)
+            })
+
+        await deleteUnreferencedPaths(removedImageUrls)
     } catch (error) {
         await conn.rollback()
         throw error
     } finally {
         conn.release()
     }
+}
+
+export async function cleanupUnusedWebsiteImages(): Promise<CleanupResult> {
+    const uploadRoot = getUploadRoot()
+    const folders = ["theme", "hero"]
+    const allFiles = folders.flatMap((folder) => listFilesRecursive(path.join(uploadRoot, folder)))
+    const uploadPaths = allFiles.map((filePath) => {
+        const relative = path.relative(path.join(process.cwd(), "public"), filePath)
+        return relative.replace(/\\/g, "/")
+    })
+
+    return deleteUnreferencedPaths(uploadPaths)
 }

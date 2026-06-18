@@ -49,7 +49,20 @@ export async function getBySlug(slug: string, lg_code: string): Promise<ArticleD
         [slug, lg_code]
     );
 
-    return rows[0] ?? null;
+    if (rows[0]) return rows[0];
+
+    const [fallbackRows] = await pool.query<(RowDataPacket & ArticleDTO)[]>(
+        `SELECT target.*
+         FROM Articles source
+         INNER JOIN Articles target
+             ON target.group_id = source.group_id
+            AND target.lg_code = ?
+         WHERE source.art_slug = ?
+         LIMIT 1`,
+        [lg_code, slug]
+    );
+
+    return fallbackRows[0] ?? null;
 }
 
 export async function getById(art_id: number): Promise<ArticleDTO | null> {

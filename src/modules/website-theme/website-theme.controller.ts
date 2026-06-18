@@ -1,5 +1,3 @@
-import fs from "fs"
-import path from "path"
 import { asyncHandler } from "../../shared/utils/asyncHandler.js"
 import { ApiError } from "../../shared/errors/ApiError.js"
 import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js"
@@ -26,15 +24,6 @@ export const getTheme = asyncHandler(async (req: Request, res: Response) => {
 export const uploadImage = asyncHandler(async (req: Request, res: Response) => {
     const file = req.file
     if (!file) throw new ApiError(400, "ไม่พบไฟล์รูปภาพ")
-
-    const websiteKey = req.body?.websiteKey as string | undefined
-    if (websiteKey && VALID_KEYS.includes(websiteKey as WebsiteKey)) {
-        const current = await service.getTheme(websiteKey as WebsiteKey)
-        if (current?.bg_image_url) {
-            const oldPath = path.join(process.cwd(), "public", current.bg_image_url)
-            if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath)
-        }
-    }
 
     const requestedFolder = typeof req.body?.folder === "string" ? req.body.folder : "theme"
     const folder = requestedFolder === "hero" ? "hero" : "theme"
@@ -74,4 +63,15 @@ export const upsertHeroSlides = asyncHandler(async (req: Request, res: Response)
 
     await service.upsertHeroSlides(key, slides)
     res.json({ message: "บันทึกสำเร็จ" })
+})
+
+export const cleanupUnusedImages = asyncHandler(async (_req: Request, res: Response) => {
+    const result = await service.cleanupUnusedWebsiteImages()
+    res.json({
+        message: "ล้างรูปภาพที่ไม่ได้ใช้งานสำเร็จ",
+        deleted_count: result.deleted.length,
+        failed_count: result.failed.length,
+        deleted: result.deleted,
+        failed: result.failed,
+    })
 })

@@ -13,6 +13,9 @@ websiteThemeRouter.get("/:websiteKey", ctrl.getTheme)
 // POST upload image — admin only
 websiteThemeRouter.post("/upload-image", Auth, upload.single("image"), ctrl.uploadImage)
 
+// DELETE unused uploaded theme/hero images — admin only
+websiteThemeRouter.delete("/unused-images", Auth, ctrl.cleanupUnusedImages)
+
 // PUT hero background — admin only
 websiteThemeRouter.put("/:websiteKey/hero-background", Auth, ctrl.upsertHeroBackground)
 
