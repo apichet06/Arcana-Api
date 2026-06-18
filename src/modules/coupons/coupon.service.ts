@@ -27,6 +27,42 @@ type CartCouponRow = RowDataPacket & {
     line_total: number;
 };
 
+const couponProductIdsSql = `(
+    SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
+    FROM CouponProducts cp
+    WHERE cp.co_id = c.co_id
+)`;
+
+const couponWebsiteKeySql = `COALESCE((
+    SELECT
+        CASE
+            WHEN COUNT(DISTINCT p.ctl_id) = 1 AND MIN(p.ctl_id) = 1 THEN 'arcana'
+            WHEN COUNT(DISTINCT p.ctl_id) = 1 AND MIN(p.ctl_id) = 2 THEN 'deadstock'
+            ELSE 'combined'
+        END
+    FROM Products p
+    WHERE (
+        EXISTS (
+            SELECT 1
+            FROM CouponProducts cp_exists
+            WHERE cp_exists.co_id = c.co_id
+        )
+        AND p.p_id IN (
+            SELECT cp.p_id
+            FROM CouponProducts cp
+            WHERE cp.co_id = c.co_id
+        )
+    )
+    OR (
+        NOT EXISTS (
+            SELECT 1
+            FROM CouponProducts cp_none
+            WHERE cp_none.co_id = c.co_id
+        )
+        AND p.st_id = c.st_id
+    )
+), 'combined')`;
+
 function toNumber(value: unknown, fallback = 0): number {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
@@ -52,6 +88,7 @@ function mapCoupon(row: CouponRow): CouponDTO {
     return {
         co_id: Number(row.co_id),
         co_code: String(row.co_code),
+        website_key: row.website_key === "arcana" || row.website_key === "deadstock" ? row.website_key : "combined",
         discount_type: row.discount_type,
         discount_value: toNumber(row.discount_value),
         max_discount_amount: row.max_discount_amount === null ? null : toNumber(row.max_discount_amount),
@@ -100,11 +137,8 @@ async function getCouponByCodeForUpdate(conn: PoolConnection, coCode: string): P
         `
         SELECT
             c.*,
-            (
-                SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
-                FROM CouponProducts cp
-                WHERE cp.co_id = c.co_id
-            ) AS product_ids
+            ${couponProductIdsSql} AS product_ids,
+            ${couponWebsiteKeySql} AS website_key
         FROM Coupon c
         WHERE c.co_code = ?
         FOR UPDATE
@@ -231,11 +265,8 @@ export async function listCoupons(stId: number): Promise<CouponDTO[]> {
         `
         SELECT
             c.*,
-            (
-                SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
-                FROM CouponProducts cp
-                WHERE cp.co_id = c.co_id
-            ) AS product_ids
+            ${couponProductIdsSql} AS product_ids,
+            ${couponWebsiteKeySql} AS website_key
         FROM Coupon c
         WHERE c.st_id = ?
         ORDER BY c.co_id DESC
@@ -264,11 +295,8 @@ export async function listAvailableCoupons(uId?: number): Promise<AvailableCoupo
         `
         SELECT
             c.*,
-            (
-                SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
-                FROM CouponProducts cp
-                WHERE cp.co_id = c.co_id
-            ) AS product_ids,
+            ${couponProductIdsSql} AS product_ids,
+            ${couponWebsiteKeySql} AS website_key,
             ${userStatusSql} AS user_coupon_status
         FROM Coupon c
         WHERE c.active = 1
@@ -304,11 +332,8 @@ export async function getCouponById(coId: number, stId?: number): Promise<Coupon
         `
         SELECT
             c.*,
-            (
-                SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
-                FROM CouponProducts cp
-                WHERE cp.co_id = c.co_id
-            ) AS product_ids
+            ${couponProductIdsSql} AS product_ids,
+            ${couponWebsiteKeySql} AS website_key
         FROM Coupon c
         WHERE c.co_id = ?
         ${storeSql}
@@ -325,11 +350,8 @@ export async function getCouponByCode(coCode: string): Promise<CouponDTO | null>
         `
         SELECT
             c.*,
-            (
-                SELECT GROUP_CONCAT(cp.p_id ORDER BY cp.p_id ASC)
-                FROM CouponProducts cp
-                WHERE cp.co_id = c.co_id
-            ) AS product_ids
+            ${couponProductIdsSql} AS product_ids,
+            ${couponWebsiteKeySql} AS website_key
         FROM Coupon c
         WHERE c.co_code = ?
         LIMIT 1

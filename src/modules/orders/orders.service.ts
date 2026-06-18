@@ -191,7 +191,7 @@ const orderItemsSelectSql = `
         COALESCE(pl.p_name, oi.product_name) AS product_name,
         oi.variant_name, oi.unit_price,
         oi.discount_amount, oi.qty, oi.line_total, oi.cost_snapshot,
-        p.st_id, s.st_company_name, oi.created_at
+        p.st_id, p.ctl_id, s.st_company_name, oi.created_at
     FROM Order_items oi
     LEFT JOIN Products p ON p.p_id = oi.p_id
     LEFT JOIN ProductVariants pv ON pv.pv_id = oi.pv_id

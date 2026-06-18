@@ -4,6 +4,7 @@ export type UserCouponStatus = "claimed" | "used" | "expired" | "cancelled";
 export type CouponDTO = {
     co_id: number;
     co_code: string;
+    website_key: "arcana" | "deadstock" | "combined";
     discount_type: CouponDiscountType;
     discount_value: number;
     max_discount_amount: number | null;

@@ -39,6 +39,7 @@ import { statusRouters } from "./modules/statuses/statuses.routes.js";
 import { webhookRouter } from "./modules/webhooks/webhook.routes.js"
 import { websiteThemeRouter } from "./modules/website-theme/website-theme.routes.js";
 import { articleRouter } from "./modules/articles/articles.routes.js";
+import { analyticsRouter } from "./modules/analytics/analytics.routes.js";
 
 
 export function createApp() {
@@ -106,6 +107,7 @@ export function createApp() {
     app.use("/api/webhooks", webhookRouter)
     app.use("/api/website-theme", websiteThemeRouter)
     app.use("/api/articles", articleRouter)
+    app.use("/api/analytics", analyticsRouter)
 
     app.get('/', (_req, res) => {
         res.status(200).send("Arcana API is running");

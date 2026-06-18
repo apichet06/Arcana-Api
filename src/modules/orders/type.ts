@@ -28,6 +28,7 @@ export type OrderItemDTO = {
     line_total: number;
     cost_snapshot: number;
     st_id?: number;
+    ctl_id?: number;
     st_company_name?: string | null;
     created_at: string;
 };
