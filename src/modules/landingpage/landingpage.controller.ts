@@ -90,7 +90,17 @@ export const UpdateLandingPage = asyncHandler(async (req, res) => {
         }
     }
 
-    const result = await landingpage.UpdateLandingPage({ ...data, lp_id, lp_imag_url: imagePath, e_id: emptId });
+    const transformedDescription = data.lp_description
+        ? transformLexicalDescription(data.lp_description, apiBaseUrl)
+        : data.lp_description;
+
+    const result = await landingpage.UpdateLandingPage({
+        ...data,
+        lp_id,
+        lp_imag_url: imagePath,
+        lp_description: transformedDescription,
+        e_id: emptId
+    });
     res.status(200).json({ message: CommonMessages.updateSuccess, data: result });
 
 })

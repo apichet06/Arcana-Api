@@ -28,7 +28,7 @@ export function prepareLexicalImages(
                 apiBaseUrl,
             });
 
-            node.src = saved.fullUrl;
+            node.src = saved.relativePath;
             replacedCount++;
 
             // console.log("replaced src:", node.src);
