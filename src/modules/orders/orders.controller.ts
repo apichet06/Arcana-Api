@@ -7,9 +7,19 @@ function getRequestLanguage(value: unknown): string {
     return typeof value === "string" && ["th", "en", "ja"].includes(value) ? value : "th";
 }
 
+function normalizeSelectedCartItemIds(value: unknown): number[] {
+    const rawItems = Array.isArray(value)
+        ? value
+        : typeof value === "string"
+            ? value.split(",")
+            : [];
+
+    return [...new Set(rawItems.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+}
+
 export const createOrder = asyncHandler(async (req, res) => {
     const u_id = req.userId;
-    const { locb_id, co_code, shipping_sc_id } = req.body ?? {};
+    const { locb_id, co_code, shipping_sc_id, selected_ci_ids } = req.body ?? {};
 
     if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
     if (!locb_id) throw new ApiError(400, "จำเป็นต้องระบุ locb_id (ที่อยู่จัดส่ง)");
@@ -20,6 +30,7 @@ export const createOrder = asyncHandler(async (req, res) => {
         locb_id,
         co_code: co_code ? String(co_code).trim() : null,
         shipping_sc_id: shipping_sc_id ? Number(shipping_sc_id) : null,
+        selected_ci_ids: normalizeSelectedCartItemIds(selected_ci_ids),
     });
     res.status(201).json({ data: order });
 });
@@ -35,6 +46,7 @@ export const checkoutOrder = asyncHandler(async (req, res) => {
         omise_source,
         saved_payment_method_id,
         save_card,
+        selected_ci_ids,
     } = req.body ?? {};
 
     if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
@@ -46,6 +58,7 @@ export const checkoutOrder = asyncHandler(async (req, res) => {
         co_code: co_code ? String(co_code).trim() : null,
         shipping_sc_id: shipping_sc_id ? Number(shipping_sc_id) : null,
         payment_method: payment_method === "promptpay" ? "promptpay" : "card",
+        selected_ci_ids: normalizeSelectedCartItemIds(selected_ci_ids),
         ...(omise_token ? { omise_token: String(omise_token) } : {}),
         ...(omise_source ? { omise_source: String(omise_source) } : {}),
         ...(saved_payment_method_id ? { saved_payment_method_id: Number(saved_payment_method_id) } : {}),
@@ -62,7 +75,11 @@ export const getShippingOptions = asyncHandler(async (req, res) => {
     if (!u_id) throw new ApiError(401, "ไม่พบข้อมูลผู้ใช้");
     if (!locb_id || isNaN(locb_id)) throw new ApiError(400, "จำเป็นต้องระบุ locb_id (ที่อยู่จัดส่ง)");
 
-    const data = await service.getCheckoutShippingOptions({ u_id, locb_id });
+    const data = await service.getCheckoutShippingOptions({
+        u_id,
+        locb_id,
+        selected_ci_ids: normalizeSelectedCartItemIds(req.query.selected_ci_ids),
+    });
     res.status(200).json({ data });
 });
 

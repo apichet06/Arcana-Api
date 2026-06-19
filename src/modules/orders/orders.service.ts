@@ -896,7 +896,12 @@ async function getActiveCartId(conn: PoolConnection, uId: number): Promise<numbe
 }
 
 // ดึงสินค้าใน cart พร้อมข้อมูล variant/product/store สำหรับ checkout
-async function getCheckoutCartItems(conn: PoolConnection, cartId: number): Promise<CheckoutCartItemRow[]> {
+async function getCheckoutCartItems(
+    conn: PoolConnection,
+    cartId: number,
+    selectedCiIds: number[] = []
+): Promise<CheckoutCartItemRow[]> {
+    const useExplicitSelection = selectedCiIds.length > 0;
     const [cartItems] = await conn.query<CheckoutCartItemRow[]>(
         `SELECT
             ci.ci_id,
@@ -928,15 +933,34 @@ async function getCheckoutCartItems(conn: PoolConnection, cartId: number): Promi
         LEFT JOIN ProductOptions po ON po.potn_id = poi.potn_id
         LEFT JOIN OptionTypes ot ON ot.otype_id = po.otype_id
         WHERE ci.cart_id = ?
-          AND ci.is_selected = 1
+          ${useExplicitSelection ? "AND ci.ci_id IN (?)" : "AND ci.is_selected = 1"}
         GROUP BY ci.ci_id, ci.pv_id, ci.qty, ci.unit_price, ci.discount_amount,
                  ci.line_total, pv.pv_sku, pv.pv_cost, pv.weight_g, pv.length_cm,
                  pv.width_cm, pv.height_cm, p.p_id, p.st_id, pl.p_name`,
-        [cartId]
+        useExplicitSelection ? [cartId, selectedCiIds] : [cartId]
     );
 
     if (!cartItems.length) throw new ApiError(400, "ไม่มีสินค้าในตะกร้าที่เลือกไว้");
     return cartItems;
+}
+
+async function deleteCheckedOutCartItems(
+    conn: PoolConnection,
+    cartId: number,
+    selectedCiIds: number[] = []
+): Promise<void> {
+    if (selectedCiIds.length > 0) {
+        await conn.query(
+            "DELETE FROM Cart_items WHERE cart_id = ? AND ci_id IN (?)",
+            [cartId, selectedCiIds]
+        );
+        return;
+    }
+
+    await conn.query(
+        "DELETE FROM Cart_items WHERE cart_id = ? AND is_selected = 1",
+        [cartId]
+    );
 }
 
 // ดึงที่อยู่จัดส่งของ buyer สำหรับใช้สร้าง order และคำนวณขนส่ง
@@ -1169,12 +1193,13 @@ function pickShippingOption(options: CalculateResult[], shippingScId?: number | 
 export async function getCheckoutShippingOptions(input: {
     u_id: number;
     locb_id: number;
+    selected_ci_ids?: number[];
 }): Promise<CalculateResult[]> {
     const conn = await pool.getConnection();
     try {
         const cartId = await getActiveCartId(conn, input.u_id);
         const [items, loc] = await Promise.all([
-            getCheckoutCartItems(conn, cartId),
+            getCheckoutCartItems(conn, cartId, input.selected_ci_ids ?? []),
             getCheckoutAddress(conn, input.u_id, input.locb_id),
         ]);
 
@@ -1203,7 +1228,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderDetailD
         const cartId = await getActiveCartId(conn, input.u_id);
 
         // ดึง cart items พร้อมข้อมูลสินค้า
-        const cartItems = await getCheckoutCartItems(conn, cartId);
+        const cartItems = await getCheckoutCartItems(conn, cartId, input.selected_ci_ids ?? []);
 
         // ดึง shipping address
         const loc = await getCheckoutAddress(conn, input.u_id, input.locb_id);
@@ -1313,10 +1338,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderDetailD
         await createShipmentGroupsForOrders(conn, createdOrderIds);
 
         // เอาออกเฉพาะรายการที่ถูกเลือกไปสร้าง order แล้ว รายการที่ไม่เลือกต้องอยู่ใน cart ต่อ
-        await conn.query(
-            "DELETE FROM Cart_items WHERE cart_id = ? AND is_selected = 1",
-            [cartId]
-        );
+        await deleteCheckedOutCartItems(conn, cartId, input.selected_ci_ids ?? []);
 
         const [remainingRows] = await conn.query<(RowDataPacket & { cnt: number })[]>(
             "SELECT COUNT(*) AS cnt FROM Cart_items WHERE cart_id = ?",
@@ -1378,7 +1400,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
         // Checkout แบบจ่ายเงินใน transaction เดียว:
         // ถ้าบัตรถูกปฏิเสธ transaction จะ rollback ทำให้ไม่เกิด order และ cart ยังอยู่เหมือนเดิม
         const cartId = await getActiveCartId(conn, input.u_id);
-        const cartItems = await getCheckoutCartItems(conn, cartId);
+        const cartItems = await getCheckoutCartItems(conn, cartId, input.selected_ci_ids ?? []);
         const loc = await getCheckoutAddress(conn, input.u_id, input.locb_id);
 
         const storeGroups = Array.from(groupCartItemsByStore(cartItems).entries());
@@ -1511,10 +1533,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
         }
 
         // ลบ cart เฉพาะหลัง payment step ผ่านแล้วเท่านั้น
-        await conn.query(
-            "DELETE FROM Cart_items WHERE cart_id = ? AND is_selected = 1",
-            [cartId]
-        );
+        await deleteCheckedOutCartItems(conn, cartId, input.selected_ci_ids ?? []);
 
         const [remainingRows] = await conn.query<(RowDataPacket & { cnt: number })[]>(
             "SELECT COUNT(*) AS cnt FROM Cart_items WHERE cart_id = ?",

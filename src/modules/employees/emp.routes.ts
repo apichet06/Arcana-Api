@@ -12,6 +12,7 @@ EmpRouter.post("/login", controller.login)
 EmpRouter.use(Auth)
 EmpRouter.get("/:st_id", controller.list)
 EmpRouter.post("/", controller.createFullAdmin)
+EmpRouter.put("/change-password/:e_id", controller.changePassword)
 EmpRouter.put("/:e_id", controller.updatefullAdmin)
 EmpRouter.delete("/:e_id", controller.deleteFullAdmin)
 

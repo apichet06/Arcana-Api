@@ -3,6 +3,7 @@ export type CreateOrderInput = {
     locb_id: number;
     co_code?: string | null;
     shipping_sc_id?: number | null;
+    selected_ci_ids?: number[];
 };
 
 export type CheckoutOrderInput = CreateOrderInput & {

@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
 import bcrypt from "bcrypt";
 import { AuthMessages } from "../../shared/messages/auth.messages.js";
+import { ApiError } from "../../shared/errors/ApiError.js";
 
 export const list = asyncHandler(async (_req, res) => {
     const { st_id } = _req.params;
@@ -64,6 +65,35 @@ export const updatefullAdmin = asyncHandler(async (req, res) => {
     res.status(200).json({ message: CommonMessages.updateSuccess });
 
 })
+
+export const changePassword = asyncHandler(async (req, res) => {
+    const { e_id } = req.params;
+    const { PasswordOld, PasswordNew } = req.body ?? {};
+    const employeeId = Number(e_id);
+
+    if (!employeeId || !PasswordOld || !PasswordNew) {
+        throw new ApiError(400, "ข้อมูลไม่ครบถ้วน");
+    }
+
+    if (Number(req.empId) !== employeeId) {
+        throw new ApiError(403, "ไม่มีสิทธิ์เปลี่ยนรหัสผ่านของผู้ใช้นี้");
+    }
+
+    const employee = await emp.findByEmpId(employeeId);
+    if (!employee) {
+        throw new ApiError(404, CommonMessages.notFound);
+    }
+
+    const isMatch = await bcrypt.compare(PasswordOld, employee.e_password);
+    if (!isMatch) {
+        throw new ApiError(400, AuthMessages.passwordNotMatch);
+    }
+
+    const hashedPassword = await bcrypt.hash(PasswordNew, 10);
+    await emp.updatePassword(employeeId, hashedPassword);
+
+    res.status(200).json({ message: CommonMessages.updateSuccess });
+});
 
 export const deleteFullAdmin = asyncHandler(async (req, res) => {
     const { e_id } = req.params;

@@ -79,6 +79,28 @@ export async function UpdateEmpAdmins(e_id: number, input: Partial<UpdateEmpInpu
     }
 }
 
+export async function updatePassword(e_id: number, e_password: string): Promise<void> {
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [result] = await conn.query<ResultSetHeader>(
+            `UPDATE Employees SET e_password = ? WHERE e_id = ?`,
+            [e_password, e_id]
+        );
+
+        if (result.affectedRows === 0) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
 export async function DeleteEmpAdmins(e_id: number): Promise<void> {
     const conn = await pool.getConnection();
     try {
