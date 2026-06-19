@@ -8,6 +8,7 @@ export type ArticleDTO = {
     art_seo_title: string;
     art_seo_description: string;
     art_published_at: string;
+    art_show_home: number | boolean;
     lg_code: string;
     group_id: number;
     st_id: number;
@@ -25,6 +26,7 @@ export type ArticleInput = {
     art_seo_title: string;
     art_seo_description: string;
     art_published_at: string;
+    art_show_home?: number | boolean;
     st_id: number;
     e_id: number;
 }
@@ -39,6 +41,7 @@ export type ArticleUpdateInput = {
     art_seo_title: string;
     art_seo_description: string;
     art_published_at: string;
+    art_show_home?: number | boolean;
     e_id: number;
     update_at?: string;
 }

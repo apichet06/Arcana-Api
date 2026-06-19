@@ -20,13 +20,17 @@ export async function list(st_id: number, lg_code: string): Promise<ArticleDTO[]
     return rows;
 }
 
-export async function publicList(lg_code: string, st_id?: number): Promise<ArticleDTO[]> {
+export async function publicList(lg_code: string, st_id?: number, homeOnly = false): Promise<ArticleDTO[]> {
     const params: Array<string | number> = [lg_code];
     let where = "WHERE lg_code = ?";
 
     if (st_id) {
         where += " AND st_id = ?";
         params.push(st_id);
+    }
+
+    if (homeOnly) {
+        where += " AND art_show_home = 1";
     }
 
     const [rows] = await pool.query<(RowDataPacket & ArticleDTO)[]>(
@@ -144,6 +148,7 @@ export async function create(input: ArticleInput): Promise<number> {
                 art_seo_title: fields[lang][2] ?? "",
                 art_seo_description: fields[lang][3] ?? "",
                 art_published_at: input.art_published_at,
+                art_show_home: input.art_show_home ? 1 : 0,
                 lg_code: lang,
                 group_id: groupId,
                 st_id: input.st_id,

@@ -17,7 +17,8 @@ export const list = asyncHandler(async (req, res) => {
 export const publicList = asyncHandler(async (req, res) => {
     const { lg_code } = req.params;
     const st_id = req.query.st_id ? Number(req.query.st_id) : undefined;
-    const data = await articles.publicList(String(lg_code), st_id);
+    const homeOnly = req.query.homeOnly === "true" || req.query.homeOnly === "1";
+    const data = await articles.publicList(String(lg_code), st_id, homeOnly);
     res.status(200).json({ data });
 });
 
