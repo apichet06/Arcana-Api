@@ -15,6 +15,7 @@ registerBuyerRouter.post("/logout", controller.logout);
 // Protected — ต้องล็อกอินก่อน (BuyerAuth ตรวจ JWT แล้วใส่ req.userId)
 registerBuyerRouter.get("/me", BuyerAuth, controller.getMe);
 registerBuyerRouter.patch("/me", BuyerAuth, controller.updateMe);
+registerBuyerRouter.patch("/me/password", BuyerAuth, controller.changePassword);
 registerBuyerRouter.get("/me/addresses", BuyerAuth, controller.getAddresses);
 registerBuyerRouter.post("/me/addresses", BuyerAuth, controller.addAddress);
 registerBuyerRouter.patch("/me/addresses/:id", BuyerAuth, controller.updateAddress);

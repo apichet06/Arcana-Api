@@ -119,6 +119,23 @@ export async function omiseRequest<T>(path: string, init: RequestInit): Promise<
     return payload;
 }
 
+async function createOmisePromptPaySource(amountSatang: number): Promise<string> {
+    const body = new URLSearchParams();
+    body.set("type", "promptpay");
+    body.set("amount", String(amountSatang));
+    body.set("currency", "thb");
+
+    const source = await omiseRequest<{ id?: string }>("/sources", {
+        method: "POST",
+        body,
+    });
+
+    if (!source.id) {
+        throw new ApiError(400, "ไม่สามารถสร้าง PromptPay source ได้");
+    }
+    return source.id;
+}
+
 async function ensurePaymentMethodTable(): Promise<void> {
     paymentMethodTableReady ??= pool.query(`
         CREATE TABLE IF NOT EXISTS User_payment_methods (
@@ -556,8 +573,8 @@ export async function createOmiseCharge(input: {
             body.set("card", input.token);
         }
     } else {
-        if (!input.source) throw new ApiError(400, "ไม่พบ source สำหรับชำระเงิน PromptPay");
-        body.set("source", input.source);
+        const source = input.source?.trim() || await createOmisePromptPaySource(input.amountSatang);
+        body.set("source", source);
     }
 
     for (const [key, value] of Object.entries(input.metadata)) {
@@ -680,9 +697,6 @@ export async function chargeAndRecordPayment(
     if (input.orders.length === 0) throw new ApiError(400, "กรุณาระบุคำสั่งซื้อที่ต้องชำระเงิน");
     if (input.payment_method === "card" && !input.omise_token?.trim() && !input.saved_payment_method_id) {
         throw new ApiError(400, "ไม่พบ token สำหรับชำระเงินด้วยบัตร");
-    }
-    if (input.payment_method === "promptpay" && !input.omise_source?.trim()) {
-        throw new ApiError(400, "ไม่พบ source สำหรับชำระเงิน PromptPay");
     }
 
     const orders = input.orders;

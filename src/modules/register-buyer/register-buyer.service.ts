@@ -311,6 +311,34 @@ export async function updateMyProfile(
     return getMyProfile(u_id);
 }
 
+// ─── Password ────────────────────────────────────────────────────────────────
+
+/** เปลี่ยนรหัสผ่าน — ตรวจสอบ current_password ก่อน แล้วค่อย hash และ update */
+export async function changePassword(
+    u_id: number,
+    current_password: string,
+    new_password: string
+): Promise<void> {
+    const [rows] = await pool.query<(RowDataPacket & { u_password: string | null; u_provider: string })[]>(
+        "SELECT u_password, u_provider FROM Users WHERE u_id = ? LIMIT 1",
+        [u_id]
+    );
+
+    const user = rows[0];
+    if (!user) throw new ApiError(404, "ไม่พบข้อมูลผู้ใช้");
+
+    // บัญชี Google / Facebook ไม่มี password — ไม่สามารถเปลี่ยนได้
+    if (user.u_provider !== "LOCAL" || !user.u_password) {
+        throw new ApiError(400, `บัญชีนี้เข้าสู่ระบบด้วย ${user.u_provider} ไม่สามารถเปลี่ยนรหัสผ่านได้`);
+    }
+
+    const match = await bcrypt.compare(current_password, user.u_password);
+    if (!match) throw new ApiError(400, "รหัสผ่านปัจจุบันไม่ถูกต้อง");
+
+    const hashed = await bcrypt.hash(new_password, 10);
+    await pool.query("UPDATE Users SET u_password = ? WHERE u_id = ?", [hashed, u_id]);
+}
+
 // ─── Addresses ──────────────────────────────────────────────────────────────
 
 /** ดึงรายการที่อยู่จัดส่งทั้งหมดของ user พร้อมชื่อจังหวัด/อำเภอ/ตำบล */

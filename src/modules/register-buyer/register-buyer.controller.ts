@@ -188,6 +188,25 @@ export const updateMe = asyncHandler(async (req, res) => {
     res.status(200).json({ data });
 });
 
+// ─── Password ────────────────────────────────────────────────────────────────
+
+export const changePassword = asyncHandler(async (req, res) => {
+    const { current_password, new_password, confirm_password } = req.body ?? {};
+
+    if (!current_password || !new_password || !confirm_password) {
+        throw new ApiError(400, "กรุณากรอกข้อมูลให้ครบถ้วน");
+    }
+    if (new_password !== confirm_password) {
+        throw new ApiError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน");
+    }
+    if (new_password.length < 8) {
+        throw new ApiError(400, "รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร");
+    }
+
+    await service.changePassword(req.userId!, current_password, new_password);
+    res.status(200).json({ message: "เปลี่ยนรหัสผ่านเรียบร้อยแล้ว" });
+});
+
 // ─── Addresses ──────────────────────────────────────────────────────────────
 
 export const getAddresses = asyncHandler(async (req, res) => {
