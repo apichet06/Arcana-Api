@@ -2,6 +2,19 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
 import type { OrderStatusCode } from "./order-status.service.js";
 import * as service from "./orders.service.js";
+import type { CheckoutOrderInput } from "./type.js";
+
+function normalizePaymentMethod(value: unknown): CheckoutOrderInput["payment_method"] {
+    if (
+        value === "card" ||
+        value === "promptpay" ||
+        value === "mobile_banking_kbank" ||
+        value === "mobile_banking_scb"
+    ) {
+        return value;
+    }
+    return "card";
+}
 
 function getRequestLanguage(value: unknown): string {
     return typeof value === "string" && ["th", "en", "ja"].includes(value) ? value : "th";
@@ -57,7 +70,7 @@ export const checkoutOrder = asyncHandler(async (req, res) => {
         locb_id: Number(locb_id),
         co_code: co_code ? String(co_code).trim() : null,
         shipping_sc_id: shipping_sc_id ? Number(shipping_sc_id) : null,
-        payment_method: payment_method === "promptpay" ? "promptpay" : "card",
+        payment_method: normalizePaymentMethod(payment_method),
         selected_ci_ids: normalizeSelectedCartItemIds(selected_ci_ids),
         ...(omise_token ? { omise_token: String(omise_token) } : {}),
         ...(omise_source ? { omise_source: String(omise_source) } : {}),

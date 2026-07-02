@@ -1520,7 +1520,7 @@ export async function checkoutOrder(input: CheckoutOrderInput): Promise<{ orders
             ...(input.omise_source ? { omise_source: input.omise_source } : {}),
             ...(input.saved_payment_method_id ? { saved_payment_method_id: input.saved_payment_method_id } : {}),
             ...(input.save_card ? { save_card: true } : {}),
-            ...(input.payment_method === "card" ? { throwOnFailed: true } : {}),
+            ...(input.payment_method !== "promptpay" ? { throwOnFailed: true } : {}),
             orders: orderRows.map((order) => ({
                 or_id: Number(order.or_id),
                 order_no: String(order.order_no),

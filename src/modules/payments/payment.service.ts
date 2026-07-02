@@ -24,6 +24,11 @@ import type {
     SavedPaymentMethodDTO,
 } from "./payment.type.js";
 
+const OMISE_MOBILE_BANKING_SOURCE_BY_METHOD = {
+    mobile_banking_kbank: "mobile_banking_kbank",
+    mobile_banking_scb: "mobile_banking_scb",
+} as const;
+
 type PayableOrderRow = RowDataPacket & {
     or_id: number;
     order_no: string;
@@ -119,9 +124,9 @@ export async function omiseRequest<T>(path: string, init: RequestInit): Promise<
     return payload;
 }
 
-async function createOmisePromptPaySource(amountSatang: number): Promise<string> {
+async function createOmiseSource(type: string, amountSatang: number, label: string): Promise<string> {
     const body = new URLSearchParams();
-    body.set("type", "promptpay");
+    body.set("type", type);
     body.set("amount", String(amountSatang));
     body.set("currency", "thb");
 
@@ -131,9 +136,34 @@ async function createOmisePromptPaySource(amountSatang: number): Promise<string>
     });
 
     if (!source.id) {
-        throw new ApiError(400, "ไม่สามารถสร้าง PromptPay source ได้");
+        throw new ApiError(400, `ไม่สามารถสร้าง ${label} source ได้`);
     }
     return source.id;
+}
+
+async function createOmisePromptPaySource(amountSatang: number): Promise<string> {
+    return createOmiseSource("promptpay", amountSatang, "PromptPay");
+}
+
+async function createOmiseMobileBankingSource(
+    paymentMethod: keyof typeof OMISE_MOBILE_BANKING_SOURCE_BY_METHOD,
+    amountSatang: number
+): Promise<string> {
+    return createOmiseSource(
+        OMISE_MOBILE_BANKING_SOURCE_BY_METHOD[paymentMethod],
+        amountSatang,
+        "Mobile Banking"
+    );
+}
+
+function toPaymentRecordMethod(paymentMethod: OmiseChargeInput["payment_method"]): string {
+    if (paymentMethod === "card") return "omise_card";
+    if (paymentMethod === "promptpay") return "omise_promptpay";
+    return `omise_${paymentMethod}`;
+}
+
+function buildOmiseFailureMessage(charge: OmiseChargeResponse, fallback: string): string {
+    return charge.failure_message || charge.failure_code || fallback;
 }
 
 async function ensurePaymentMethodTable(): Promise<void> {
@@ -572,9 +602,13 @@ export async function createOmiseCharge(input: {
             if (!input.token) throw new ApiError(400, "ไม่พบ token สำหรับชำระเงินด้วยบัตร");
             body.set("card", input.token);
         }
-    } else {
+    } else if (input.paymentMethod === "promptpay") {
         const source = input.source?.trim() || await createOmisePromptPaySource(input.amountSatang);
         body.set("source", source);
+    } else {
+        const source = input.source?.trim() || await createOmiseMobileBankingSource(input.paymentMethod, input.amountSatang);
+        body.set("source", source);
+        body.set("return_uri", env.OMISE_RETURN_URI || "https://arcana-callback.local/omise");
     }
 
     for (const [key, value] of Object.entries(input.metadata)) {
@@ -735,7 +769,10 @@ export async function chargeAndRecordPayment(
     const paymentStatus: PaymentResultDTO["payment_status"] = isPaid ? "paid" : isPending ? "pending" : "failed";
 
     if (paymentStatus === "failed" && input.throwOnFailed) {
-        throw new ApiError(400, "ชำระเงินไม่สำเร็จ กรุณาตรวจสอบข้อมูลบัตรแล้วลองใหม่", charge);
+        const fallback = input.payment_method === "card"
+            ? "ชำระเงินไม่สำเร็จ กรุณาตรวจสอบข้อมูลบัตรแล้วลองใหม่"
+            : "ชำระเงินผ่านธนาคารไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
+        throw new ApiError(400, buildOmiseFailureMessage(charge, fallback), charge);
     }
 
     const paymentNo = buildPaymentNo();
@@ -748,7 +785,7 @@ export async function chargeAndRecordPayment(
         [
             paymentNo,
             amountTotal.toFixed(2),
-            input.payment_method === "card" ? "omise_card" : "omise_promptpay",
+            toPaymentRecordMethod(input.payment_method),
             paymentStatus,
             charge.id ?? null,
             isPaid ? new Date() : null,
@@ -913,14 +950,14 @@ export async function syncPromptPayChargeForOrder(uId: number, orderId: number):
          INNER JOIN Orders o ON o.or_id = po.or_id
          WHERE o.or_id = ?
            AND o.u_id = ?
-           AND p.payment_method = 'omise_promptpay'
+           AND p.payment_method IN ('omise_promptpay', 'omise_mobile_banking_kbank', 'omise_mobile_banking_scb')
          ORDER BY p.pay_id DESC
          LIMIT 1`,
         [orderId, uId]
     );
 
     const payment = rows[0];
-    if (!payment) throw new ApiError(404, "ไม่พบรายการชำระเงิน PromptPay ของคำสั่งซื้อนี้");
+    if (!payment) throw new ApiError(404, "ไม่พบรายการชำระเงิน Omise ของคำสั่งซื้อนี้");
 
     if (payment.payment_status === "pending" && payment.payment_ref) {
         const charge = await omiseRequest<OmiseChargeResponse>(`/charges/${payment.payment_ref}`, {
@@ -971,6 +1008,7 @@ export async function chargeOrdersWithOmise(input: OmiseChargeInput): Promise<Pa
             ...(input.omise_source ? { omise_source: input.omise_source } : {}),
             ...(input.saved_payment_method_id ? { saved_payment_method_id: input.saved_payment_method_id } : {}),
             ...(input.save_card ? { save_card: true } : {}),
+            ...(input.payment_method !== "promptpay" ? { throwOnFailed: true } : {}),
             orders,
         });
 

@@ -1,7 +1,13 @@
+export type OmisePaymentMethod =
+    | "card"
+    | "promptpay"
+    | "mobile_banking_kbank"
+    | "mobile_banking_scb";
+
 export type OmiseChargeInput = {
     u_id: number;
     order_ids: number[];
-    payment_method: "card" | "promptpay";
+    payment_method: OmisePaymentMethod;
     omise_token?: string;
     omise_source?: string;
     saved_payment_method_id?: number;

@@ -1,3 +1,5 @@
+import type { OmisePaymentMethod } from "../payments/payment.type.js";
+
 export type CreateOrderInput = {
     u_id: number;
     locb_id: number;
@@ -7,7 +9,7 @@ export type CreateOrderInput = {
 };
 
 export type CheckoutOrderInput = CreateOrderInput & {
-    payment_method: "card" | "promptpay";
+    payment_method: OmisePaymentMethod;
     omise_token?: string;
     omise_source?: string;
     saved_payment_method_id?: number;

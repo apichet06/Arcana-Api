@@ -1,6 +1,19 @@
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
 import * as service from "./payment.service.js";
+import type { OmiseChargeInput } from "./payment.type.js";
+
+function normalizePaymentMethod(value: unknown): OmiseChargeInput["payment_method"] {
+    if (
+        value === "card" ||
+        value === "promptpay" ||
+        value === "mobile_banking_kbank" ||
+        value === "mobile_banking_scb"
+    ) {
+        return value;
+    }
+    return "card";
+}
 
 export const chargeOmise = asyncHandler(async (req, res) => {
     const uId = req.userId;
@@ -12,7 +25,7 @@ export const chargeOmise = asyncHandler(async (req, res) => {
     const input = {
         u_id: uId,
         order_ids,
-        payment_method: payment_method === "promptpay" ? "promptpay" : "card",
+        payment_method: normalizePaymentMethod(payment_method),
         ...(omise_token ? { omise_token: String(omise_token) } : {}),
         ...(omise_source ? { omise_source: String(omise_source) } : {}),
         ...(saved_payment_method_id ? { saved_payment_method_id: Number(saved_payment_method_id) } : {}),
