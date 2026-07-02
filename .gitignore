@@ -79,6 +79,11 @@ web_modules/
 .env.production.local
 .env.local
 
+# Google service account keys
+*service-account*.json
+*gserviceaccount*.json
+my-project-arcana-*.json
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

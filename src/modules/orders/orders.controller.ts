@@ -113,9 +113,11 @@ export const adminGetSalesReport = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
 
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
     const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
     const report = await service.adminGetSalesReport(st_id, {
+        lg_code,
         ...(start_date ? { start_date } : {}),
         ...(end_date ? { end_date } : {}),
     });
@@ -126,9 +128,11 @@ export const adminGetSalesByProductReport = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
 
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
     const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
     const report = await service.adminGetSalesByProductReport(st_id, {
+        lg_code,
         ...(start_date ? { start_date } : {}),
         ...(end_date ? { end_date } : {}),
     });
@@ -139,9 +143,11 @@ export const adminGetSalesByCategoryReport = asyncHandler(async (req, res) => {
     const st_id = Number(req.storeId);
     if (!st_id) throw new ApiError(401, "ไม่พบข้อมูลร้านค้า");
 
+    const lg_code = getRequestLanguage(req.query.lg_code);
     const start_date = typeof req.query.start_date === "string" ? req.query.start_date : undefined;
     const end_date = typeof req.query.end_date === "string" ? req.query.end_date : undefined;
     const report = await service.adminGetSalesByCategoryReport(st_id, {
+        lg_code,
         ...(start_date ? { start_date } : {}),
         ...(end_date ? { end_date } : {}),
     });

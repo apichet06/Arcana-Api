@@ -1787,11 +1787,11 @@ export async function adminGetOrderSummary(st_id: number): Promise<AdminOrderSum
 // รายงานยอดขายรวมตามช่วงวันที่ของร้าน ใช้ดูภาพรวมราย order
 export async function adminGetSalesReport(
     st_id: number,
-    filters: { start_date?: string; end_date?: string } = {}
+    filters: { start_date?: string; end_date?: string; lg_code?: string } = {}
 ): Promise<AdminSalesReportDTO> {
     await ensureOrderShipmentTables();
 
-    const params: (number | string)[] = [];
+    const params: (number | string)[] = [filters.lg_code ?? "th"];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
@@ -1829,7 +1829,7 @@ export async function adminGetSalesReport(
         LEFT JOIN Users u ON u.u_id = o.u_id
         LEFT JOIN Store st ON st.st_id = o.st_id
         LEFT JOIN Status os ON os.s_id = o.s_id
-        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = 'th'
+        LEFT JOIN StatusLangs osl ON osl.s_id = os.s_id AND osl.lg_code = ?
         LEFT JOIN (
             SELECT
                 or_id,
@@ -1923,11 +1923,11 @@ export async function adminGetSalesReport(
 // รายงานยอดขายแยกตามสินค้าและ variant
 export async function adminGetSalesByProductReport(
     st_id: number,
-    filters: { start_date?: string; end_date?: string } = {}
+    filters: { start_date?: string; end_date?: string; lg_code?: string } = {}
 ): Promise<AdminSalesByProductReportDTO> {
     await ensureOrderShipmentTables();
 
-    const params: (number | string)[] = [];
+    const params: (number | string)[] = [filters.lg_code ?? "th"];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
@@ -1969,7 +1969,7 @@ export async function adminGetSalesByProductReport(
         INNER JOIN Orders o ON o.or_id = oi.or_id
         INNER JOIN Status os ON os.s_id = o.s_id
         LEFT JOIN Products p ON p.p_id = oi.p_id
-        LEFT JOIN ProductLangs pl ON pl.p_id = oi.p_id AND pl.lg_code = 'th'
+        LEFT JOIN ProductLangs pl ON pl.p_id = oi.p_id AND pl.lg_code = ?
         LEFT JOIN Store st ON st.st_id = p.st_id
         LEFT JOIN (
             SELECT
@@ -2041,11 +2041,11 @@ export async function adminGetSalesByProductReport(
 // รายงานยอดขายแยกตามหมวดหมู่สินค้า
 export async function adminGetSalesByCategoryReport(
     st_id: number,
-    filters: { start_date?: string; end_date?: string } = {}
+    filters: { start_date?: string; end_date?: string; lg_code?: string } = {}
 ): Promise<AdminSalesByCategoryReportDTO> {
     await ensureOrderShipmentTables();
 
-    const params: (number | string)[] = [];
+    const params: (number | string)[] = [filters.lg_code ?? "th"];
     const storeSql = st_id === ADMIN_ALL_STORE_ID ? "" : "AND o.st_id = ?";
     if (storeSql) params.push(st_id);
 
@@ -2090,7 +2090,7 @@ export async function adminGetSalesByCategoryReport(
         INNER JOIN Status os ON os.s_id = o.s_id
         LEFT JOIN Products p ON p.p_id = oi.p_id
         LEFT JOIN Categorys c ON c.c_id = p.c_id
-        LEFT JOIN CategoryLangs cl ON cl.c_id = c.c_id AND cl.lg_code = 'th'
+        LEFT JOIN CategoryLangs cl ON cl.c_id = c.c_id AND cl.lg_code = ?
         LEFT JOIN Catalog ctl ON ctl.ctl_id = c.ctl_id
         LEFT JOIN (
             SELECT

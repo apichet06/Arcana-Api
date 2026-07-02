@@ -8,7 +8,11 @@ import { ApiError } from "../../shared/errors/ApiError.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 
 export async function ListNotification(st_id: number): Promise<NotificationDTO[]> {
-    const [res] = await pool.query<RowDataPacket[] & NotificationDTO[]>(`SELECT * FROM Notifications WHERE target_id = ? ORDER BY noti_id DESC `, [st_id]
+    const [res] = await pool.query<RowDataPacket[] & NotificationDTO[]>(
+        `SELECT * FROM Notifications
+         WHERE target_type = 'STORE' AND target_id = ?
+         ORDER BY noti_id DESC`,
+        [st_id]
     )
     return res
     // return res.map(row => ({
@@ -51,7 +55,9 @@ export async function UpdateBuyerAsRead(noti_id: number, userId: number): Promis
 
 export async function UpdateAllRead(st_id: number): Promise<void> {
     await pool.query<ResultSetHeader>(
-        `UPDATE Notifications SET is_read = 1, read_at = ? WHERE target_id = ? AND is_read = 0`,
+        `UPDATE Notifications
+         SET is_read = 1, read_at = ?
+         WHERE target_type = 'STORE' AND target_id = ? AND is_read = 0`,
         [new Date(), st_id]
     );
 }
@@ -67,7 +73,7 @@ export async function UpdateBuyerAllRead(userId: number): Promise<void> {
 
 export async function CreateNotification(input: NotificationInput): Promise<void> {
     const conn = await pool.getConnection();
-    let notification: Record<string, unknown>;
+    const notifications: Record<string, unknown>[] = [];
     try {
         await conn.beginTransaction();
         const MasterData = {
@@ -82,16 +88,42 @@ export async function CreateNotification(input: NotificationInput): Promise<void
             priority: input.priority ?? "NORMAL",
         }
         const [result] = await conn.query<ResultSetHeader>("INSERT INTO Notifications SET ?", MasterData);
-
-        await conn.commit();
-
-        notification = {
+        notifications.push({
             noti_id: result.insertId,
             ...MasterData,
             is_read: 0,
             read_at: null,
             created_at: new Date(),
-        };
+        });
+
+        if (input.target_type === "STORE") {
+            const [platformStores] = await conn.query<(RowDataPacket & { st_id: number })[]>(
+                "SELECT st_id FROM Store WHERE is_platform_store = 1"
+            );
+
+            for (const store of platformStores) {
+                const platformStoreId = Number(store.st_id);
+                if (!platformStoreId || platformStoreId === Number(input.target_id)) continue;
+
+                const platformData = {
+                    ...MasterData,
+                    target_id: platformStoreId,
+                };
+                const [platformResult] = await conn.query<ResultSetHeader>(
+                    "INSERT INTO Notifications SET ?",
+                    platformData
+                );
+                notifications.push({
+                    noti_id: platformResult.insertId,
+                    ...platformData,
+                    is_read: 0,
+                    read_at: null,
+                    created_at: new Date(),
+                });
+            }
+        }
+
+        await conn.commit();
     } catch (error) {
         await conn.rollback();
         throw error;
@@ -99,6 +131,8 @@ export async function CreateNotification(input: NotificationInput): Promise<void
         conn.release();
     }
 
-    const roomName = `${input.target_type}_${input.target_id}`;
-    getIO().to(roomName).emit("notification:new", notification);
+    for (const notification of notifications) {
+        const roomName = `${notification.target_type}_${notification.target_id}`;
+        getIO().to(roomName).emit("notification:new", notification);
+    }
 }

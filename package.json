@@ -32,6 +32,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@google-analytics/data": "^6.1.0",
     "@google/genai": "^1.41.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
