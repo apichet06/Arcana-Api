@@ -9,6 +9,8 @@ export const EmpRouter = Router();
 const upload = multer({ dest: "public/uploads/" });
 
 EmpRouter.post("/login", controller.login)
+EmpRouter.post("/forgot-password", controller.forgotPassword)
+EmpRouter.post("/reset-password", controller.resetPassword)
 EmpRouter.use(Auth)
 EmpRouter.get("/:st_id", controller.list)
 EmpRouter.post("/", controller.createFullAdmin)

@@ -33,10 +33,148 @@ export async function findByEmpLogin(e_email: string): Promise<empDTO | null> {
     return rows[0] || null;
 }
 
+async function ensurePasswordResetTable(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS Employee_Password_Reset_Tokens (
+            prt_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            e_id INT NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            request_ip VARCHAR(64) NULL,
+            user_agent VARCHAR(255) NULL,
+            PRIMARY KEY (prt_id),
+            UNIQUE KEY uq_employee_password_reset_token_hash (token_hash),
+            KEY idx_employee_password_reset_e_id (e_id),
+            KEY idx_employee_password_reset_expires_at (expires_at)
+        )
+    `);
+}
+
+export async function findPasswordResetEmployeeByEmail(e_email: string): Promise<Pick<empDTO, "e_id" | "e_firstname" | "e_lastname" | "e_email" | "e_isActive"> | null> {
+    const [rows] = await pool.query<(Pick<empDTO, "e_id" | "e_firstname" | "e_lastname" | "e_email" | "e_isActive"> & RowDataPacket)[]>(
+        `SELECT e_id, e_firstname, e_lastname, e_email, e_isActive
+         FROM Employees
+         WHERE e_email = ?
+         LIMIT 1`,
+        [e_email],
+    );
+    return rows[0] || null;
+}
+
+export async function createPasswordResetToken(input: {
+    e_id: number;
+    tokenHash: string;
+    expiresAt: Date;
+    requestIp?: string | null;
+    userAgent?: string | null;
+}): Promise<void> {
+    await ensurePasswordResetTable();
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query(
+            `UPDATE Employee_Password_Reset_Tokens
+             SET used_at = ?
+             WHERE e_id = ? AND used_at IS NULL`,
+            [new Date(), input.e_id],
+        );
+        await conn.query(
+            `INSERT INTO Employee_Password_Reset_Tokens
+             (e_id, token_hash, expires_at, request_ip, user_agent)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+                input.e_id,
+                input.tokenHash,
+                input.expiresAt,
+                input.requestIp ?? null,
+                input.userAgent ? input.userAgent.slice(0, 255) : null,
+            ],
+        );
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function resetPasswordWithToken(tokenHash: string, hashedPassword: string): Promise<void> {
+    await ensurePasswordResetTable();
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query<(RowDataPacket & {
+            prt_id: number;
+            e_id: number;
+            expires_at: Date;
+            used_at: Date | null;
+        })[]>(
+            `SELECT prt_id, e_id, expires_at, used_at
+             FROM Employee_Password_Reset_Tokens
+             WHERE token_hash = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [tokenHash],
+        );
+        const resetToken = rows[0];
+        if (!resetToken || resetToken.used_at || new Date(resetToken.expires_at).getTime() <= Date.now()) {
+            throw new ApiError(400, "ลิงก์ตั้งรหัสผ่านไม่ถูกต้องหรือหมดอายุแล้ว");
+        }
+
+        const [employeeResult] = await conn.query<ResultSetHeader>(
+            `UPDATE Employees SET e_password = ? WHERE e_id = ?`,
+            [hashedPassword, resetToken.e_id],
+        );
+        if (employeeResult.affectedRows === 0) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+
+        await conn.query(
+            `UPDATE Employee_Password_Reset_Tokens
+             SET used_at = ?
+             WHERE e_id = ? AND used_at IS NULL`,
+            [new Date(), resetToken.e_id],
+        );
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
 export async function findByEmpId(e_id: number): Promise<empDTO | null> {
     const [rows] = await pool.query<(empDTO & RowDataPacket)[]>(
         `SELECT * FROM Employees WHERE  e_id = ?`, [e_id]);
     return rows[0] || null;
+}
+
+async function countActiveOwners(st_id: number, excludeEmpId?: number): Promise<number> {
+    const params: (number | string)[] = [st_id, "Owner"];
+    let sql = `SELECT COUNT(*) AS total FROM Employees WHERE st_id = ? AND e_status = ? AND e_isActive = 1`;
+
+    if (excludeEmpId) {
+        sql += ` AND e_id <> ?`;
+        params.push(excludeEmpId);
+    }
+
+    const [rows] = await pool.query<RowDataPacket[]>(sql, params);
+    return Number(rows[0]?.total ?? 0);
+}
+
+async function assertStoreKeepsActiveOwner(st_id: number, excludeEmpId?: number): Promise<void> {
+    const ownerCount = await countActiveOwners(st_id, excludeEmpId);
+    if (ownerCount < 1) {
+        throw new ApiError(400, "ร้านต้องมี Owner ที่ใช้งานได้อย่างน้อย 1 คน");
+    }
+}
+
+function toActiveBoolean(value: unknown): boolean {
+    return value === true || value === 1 || value === "1" || value === "true";
 }
 
 
@@ -65,6 +203,23 @@ export async function UpdateEmpAdmins(e_id: number, input: Partial<UpdateEmpInpu
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
+        const [currentRows] = await conn.query<(empDTO & RowDataPacket)[]>(`SELECT * FROM Employees WHERE e_id = ? LIMIT 1`, [e_id]);
+        const current = currentRows[0];
+        if (!current) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+
+        const nextStatus = input.e_status ?? current.e_status;
+        const nextIsActive = input.e_isActive ?? current.e_isActive;
+        const willStopBeingActiveOwner = current.e_status === "Owner" && (nextStatus !== "Owner" || !toActiveBoolean(nextIsActive));
+
+        if (willStopBeingActiveOwner) {
+            const ownerCount = await countActiveOwners(current.st_id, e_id);
+            if (ownerCount < 1) {
+                throw new ApiError(400, "ร้านต้องมี Owner ที่ใช้งานได้อย่างน้อย 1 คน");
+            }
+        }
+
         const [result] = await conn.query<ResultSetHeader>(`UPDATE Employees SET ? WHERE e_id = ?`, [input, e_id]);
         if (result.affectedRows === 0) {
             throw new ApiError(404, CommonMessages.notFound);
@@ -105,6 +260,15 @@ export async function DeleteEmpAdmins(e_id: number): Promise<void> {
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
+        const [currentRows] = await conn.query<(empDTO & RowDataPacket)[]>(`SELECT * FROM Employees WHERE e_id = ? LIMIT 1`, [e_id]);
+        const current = currentRows[0];
+        if (!current) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+
+        if (current.e_status === "Owner" && toActiveBoolean(current.e_isActive)) {
+            await assertStoreKeepsActiveOwner(current.st_id, e_id);
+        }
 
         const [result] = await conn.query<ResultSetHeader>(`DELETE FROM Employees WHERE e_id = ?`, [e_id]);
 

@@ -8,6 +8,7 @@ import type { AddAddressInput, AddressDTO, AuthResult, FacebookUserInfo, GoogleU
 
 const REFRESH_TOKEN_DAYS = 30;
 let refreshTokenTableReady: Promise<void> | null = null;
+let passwordResetTableReady: Promise<void> | null = null;
 
 function hashRefreshToken(token: string): string {
     return crypto.createHash("sha256").update(token).digest("hex");
@@ -41,6 +42,26 @@ async function ensureRefreshTokenTable(): Promise<void> {
     `).then(() => undefined);
 
     return refreshTokenTableReady;
+}
+
+async function ensurePasswordResetTable(): Promise<void> {
+    passwordResetTableReady ??= pool.query(`
+        CREATE TABLE IF NOT EXISTS User_password_reset_tokens (
+            uprt_id BIGINT NOT NULL AUTO_INCREMENT,
+            u_id INT NOT NULL,
+            token_hash CHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            request_ip VARCHAR(64) NULL,
+            user_agent VARCHAR(255) NULL,
+            PRIMARY KEY (uprt_id),
+            UNIQUE KEY uq_user_password_reset_token_hash (token_hash),
+            KEY idx_user_password_reset_user (u_id, used_at, expires_at)
+        )
+    `).then(() => undefined);
+
+    return passwordResetTableReady;
 }
 
 export const refreshTokenConfig = {
@@ -172,6 +193,124 @@ export async function loginBuyer(email: string, password: string): Promise<Regis
     await pool.query("UPDATE Users SET u_last_login = ? WHERE u_id = ?", [new Date(), user.u_id]);
 
     return { u_id: user.u_id, u_username: user.u_username, u_email: user.u_email, u_avatar: user.u_avatar, u_create_at: user.u_create_at };
+}
+
+export async function findPasswordResetBuyerByEmail(email: string): Promise<(RegisterBuyerDTO & {
+    u_provider: string;
+    has_password: 0 | 1;
+}) | null> {
+    const [rows] = await pool.query<(RowDataPacket & RegisterBuyerDTO & {
+        u_provider: string;
+        has_password: 0 | 1;
+    })[]>(
+        `SELECT u_id, u_username, u_email, u_avatar, u_provider,
+                CASE WHEN u_password IS NULL THEN 0 ELSE 1 END AS has_password,
+                u_create_at
+         FROM Users
+         WHERE u_email = ?
+         LIMIT 1`,
+        [email]
+    );
+
+    return rows[0] ?? null;
+}
+
+export async function createPasswordResetToken(input: {
+    u_id: number;
+    tokenHash: string;
+    expiresAt: Date;
+    requestIp?: string | null;
+    userAgent?: string | null;
+}): Promise<void> {
+    await ensurePasswordResetTable();
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+        await conn.query(
+            `UPDATE User_password_reset_tokens
+             SET used_at = ?
+             WHERE u_id = ? AND used_at IS NULL`,
+            [new Date(), input.u_id]
+        );
+        await conn.query(
+            `INSERT INTO User_password_reset_tokens
+                (u_id, token_hash, expires_at, request_ip, user_agent)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+                input.u_id,
+                input.tokenHash,
+                input.expiresAt,
+                input.requestIp?.slice(0, 64) ?? null,
+                input.userAgent?.slice(0, 255) ?? null,
+            ]
+        );
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function resetPasswordWithToken(tokenHash: string, hashedPassword: string): Promise<void> {
+    await ensurePasswordResetTable();
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query<(RowDataPacket & {
+            uprt_id: number;
+            u_id: number;
+            expires_at: Date;
+            used_at: Date | null;
+            u_provider: string;
+            u_password: string | null;
+        })[]>(
+            `SELECT prt.uprt_id, prt.u_id, prt.expires_at, prt.used_at, u.u_provider, u.u_password
+             FROM User_password_reset_tokens prt
+             INNER JOIN Users u ON u.u_id = prt.u_id
+             WHERE prt.token_hash = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [tokenHash]
+        );
+
+        const resetToken = rows[0];
+        if (
+            !resetToken ||
+            resetToken.used_at ||
+            new Date(resetToken.expires_at).getTime() <= Date.now() ||
+            resetToken.u_provider !== "LOCAL" ||
+            !resetToken.u_password
+        ) {
+            throw new ApiError(400, "ลิงก์ตั้งรหัสผ่านไม่ถูกต้องหรือหมดอายุแล้ว");
+        }
+
+        const [result] = await conn.query<ResultSetHeader>(
+            `UPDATE Users
+             SET u_password = ?
+             WHERE u_id = ? AND u_provider = ?`,
+            [hashedPassword, resetToken.u_id, "LOCAL"]
+        );
+        if (result.affectedRows === 0) {
+            throw new ApiError(404, "ไม่พบข้อมูลผู้ใช้");
+        }
+
+        await conn.query(
+            `UPDATE User_password_reset_tokens
+             SET used_at = ?
+             WHERE u_id = ? AND used_at IS NULL`,
+            [new Date(), resetToken.u_id]
+        );
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
 }
 
 export async function createRefreshTokenSession(input: RefreshTokenSessionInput): Promise<string> {

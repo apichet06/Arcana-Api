@@ -6,6 +6,23 @@ import { fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
 import bcrypt from "bcrypt";
 import { AuthMessages } from "../../shared/messages/auth.messages.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
+import crypto from "crypto";
+import { sendEmployeePasswordResetEmail } from "../../mailer/mailer.js";
+
+const PASSWORD_RESET_EXPIRES_MINUTES = 30;
+const FORGOT_PASSWORD_MESSAGE = "หากอีเมลนี้อยู่ในระบบ เราได้ส่งลิงก์ตั้งรหัสผ่านใหม่ให้แล้ว";
+
+function hashResetToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function employeeDisplayName(employee: { e_firstname?: string | null; e_lastname?: string | null }): string | null {
+    return [employee.e_firstname, employee.e_lastname].filter(Boolean).join(" ").trim() || null;
+}
+
+function isActiveEmployee(value: unknown): boolean {
+    return value === true || value === 1 || value === "1";
+}
 
 export const list = asyncHandler(async (_req, res) => {
     const { st_id } = _req.params;
@@ -45,6 +62,62 @@ export const login = asyncHandler(async (req, res) => {
     const { e_password, e_phone, e_upd_name, e_add_name, e_add_datetime, ...data } = employee;
     res.status(200).json({ token, data: data });
 })
+
+export const forgotPassword = asyncHandler(async (req, res) => {
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    if (!email) {
+        throw new ApiError(400, "กรุณาระบุอีเมล");
+    }
+
+    const employee = await emp.findPasswordResetEmployeeByEmail(email);
+    const backofficeUrl = process.env.BACKOFFICE_URL?.trim();
+
+    if (employee && isActiveEmployee(employee.e_isActive) && backofficeUrl) {
+        const token = crypto.randomBytes(32).toString("hex");
+        const tokenHash = hashResetToken(token);
+        const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRES_MINUTES * 60 * 1000);
+        await emp.createPasswordResetToken({
+            e_id: employee.e_id,
+            tokenHash,
+            expiresAt,
+            requestIp: req.ip ?? null,
+            userAgent: req.get("user-agent") ?? null,
+        });
+
+        const resetUrl = `${backofficeUrl.replace(/\/+$/, "")}/reset-password?token=${encodeURIComponent(token)}`;
+        await sendEmployeePasswordResetEmail({
+            email: employee.e_email,
+            name: employeeDisplayName(employee),
+            resetUrl,
+            expiresInMinutes: PASSWORD_RESET_EXPIRES_MINUTES,
+        });
+    } else if (employee && isActiveEmployee(employee.e_isActive) && !backofficeUrl) {
+        console.warn("[forgot-password] skipped email: BACKOFFICE_URL is missing");
+    }
+
+    res.status(200).json({ message: FORGOT_PASSWORD_MESSAGE });
+});
+
+export const resetPassword = asyncHandler(async (req, res) => {
+    const token = String(req.body?.token ?? "").trim();
+    const password = String(req.body?.password ?? "");
+    const confirmPassword = String(req.body?.confirmPassword ?? req.body?.confirm_password ?? "");
+
+    if (!token || !password || !confirmPassword) {
+        throw new ApiError(400, "ข้อมูลไม่ครบถ้วน");
+    }
+    if (password !== confirmPassword) {
+        throw new ApiError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน");
+    }
+    if (password.length < 8) {
+        throw new ApiError(400, "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await emp.resetPasswordWithToken(hashResetToken(token), hashedPassword);
+
+    res.status(200).json({ message: "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง" });
+});
 
 
 export const createFullAdmin = asyncHandler(async (req, res) => {

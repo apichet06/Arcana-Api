@@ -41,6 +41,7 @@ import { websiteThemeRouter } from "./modules/website-theme/website-theme.routes
 import { articleRouter } from "./modules/articles/articles.routes.js";
 import { analyticsRouter } from "./modules/analytics/analytics.routes.js";
 import { googleAnalyticsRouter } from "./modules/google-analytics/google-analytics.routes.js";
+import { sellerApplicationRouter } from "./modules/seller-applications/seller-applications.routes.js";
 
 
 export function createApp() {
@@ -110,6 +111,7 @@ export function createApp() {
     app.use("/api/articles", articleRouter)
     app.use("/api/analytics", analyticsRouter)
     app.use("/api/google-analytics", googleAnalyticsRouter)
+    app.use("/api/seller-applications", sellerApplicationRouter)
 
     app.get('/', (_req, res) => {
         res.status(200).send("Arcana API is running");

@@ -1,4 +1,6 @@
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
+import crypto from "crypto";
 import type { Request, Response } from "express";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
@@ -6,8 +8,15 @@ import * as service from "./register-buyer.service.js";
 import { UserMessages } from "../../shared/messages/user.messages.js";
 import { AuthMessages } from "../../shared/messages/auth.messages.js";
 import type { RegisterBuyerDTO } from "./type.js";
+import { sendBuyerPasswordResetEmail } from "../../mailer/mailer.js";
 
 const ACCESS_TOKEN_EXPIRES_IN = "30m";
+const PASSWORD_RESET_EXPIRES_MINUTES = 30;
+const FORGOT_PASSWORD_MESSAGE = "หากอีเมลนี้อยู่ในระบบ เราได้ส่งลิงก์ตั้งรหัสผ่านใหม่ให้แล้ว";
+
+function hashResetToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
 
 function signAccessToken(user: RegisterBuyerDTO): string {
     const secret = process.env.JWT_SECRET;
@@ -167,6 +176,76 @@ export const logout = asyncHandler(async (req, res) => {
     if (refreshToken) await service.revokeRefreshToken(refreshToken);
     clearRefreshCookie(req, res);
     res.status(200).json({ message: "ออกจากระบบเรียบร้อยแล้ว" });
+});
+
+export const forgotPassword = asyncHandler(async (req, res) => {
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    if (!email) {
+        throw new ApiError(400, "กรุณาระบุอีเมล");
+    }
+
+    const user = await service.findPasswordResetBuyerByEmail(email);
+    const shopUrl = process.env.ARCANA_SHOP_URL?.trim()
+        || process.env.SHOP_URL?.trim()
+        || process.env.FRONTEND_URL?.trim()
+        || req.get("origin")?.trim();
+
+    if (user && (user.u_provider !== "LOCAL" || user.has_password !== 1)) {
+        const provider = user.u_provider === "GOOGLE" || user.u_provider === "FACEBOOK" ? user.u_provider : "SOCIAL";
+        const providerLabel = provider === "GOOGLE" ? "Google" : provider === "FACEBOOK" ? "Facebook" : "Social Login";
+        return res.status(200).json({
+            status: "oauth_account",
+            provider,
+            message: `อีเมลนี้เข้าสู่ระบบด้วย ${providerLabel} กรุณากลับไปเข้าสู่ระบบด้วย ${providerLabel}`,
+        });
+    }
+
+    if (user && shopUrl) {
+        const token = crypto.randomBytes(32).toString("hex");
+        const tokenHash = hashResetToken(token);
+        const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRES_MINUTES * 60 * 1000);
+
+        await service.createPasswordResetToken({
+            u_id: user.u_id,
+            tokenHash,
+            expiresAt,
+            requestIp: req.ip ?? null,
+            userAgent: req.get("user-agent") ?? null,
+        });
+
+        const resetUrl = `${shopUrl.replace(/\/+$/, "")}/reset-password?token=${encodeURIComponent(token)}`;
+        await sendBuyerPasswordResetEmail({
+            email: user.u_email,
+            name: user.u_username,
+            resetUrl,
+            expiresInMinutes: PASSWORD_RESET_EXPIRES_MINUTES,
+        });
+    } else if (user && !shopUrl) {
+        console.warn("[buyer forgot-password] skipped email: ARCANA_SHOP_URL, SHOP_URL, FRONTEND_URL, and request origin are missing");
+    }
+
+    res.status(200).json({ status: "reset_email_sent", message: FORGOT_PASSWORD_MESSAGE });
+});
+
+export const resetPassword = asyncHandler(async (req, res) => {
+    const token = String(req.body?.token ?? "").trim();
+    const password = String(req.body?.password ?? "");
+    const confirmPassword = String(req.body?.confirmPassword ?? req.body?.confirm_password ?? "");
+
+    if (!token || !password || !confirmPassword) {
+        throw new ApiError(400, "ข้อมูลไม่ครบถ้วน");
+    }
+    if (password !== confirmPassword) {
+        throw new ApiError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน");
+    }
+    if (password.length < 8) {
+        throw new ApiError(400, "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await service.resetPasswordWithToken(hashResetToken(token), hashedPassword);
+
+    res.status(200).json({ message: "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง" });
 });
 
 // ─── Profile ────────────────────────────────────────────────────────────────

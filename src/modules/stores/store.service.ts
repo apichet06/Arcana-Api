@@ -14,6 +14,7 @@ import { CommonMessages } from "../../shared/messages/index.js";
 import type { empDTO } from "../employees/emp.type.js";
 import * as notiService from "../notifications/notification.service.js";
 import type { NotificationInput } from "../notifications/type.js";
+import type { StoreRegistrationEmailInput } from "../../mailer/type.js";
 
 async function isPlatformStore(st_id: number): Promise<boolean> {
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -89,6 +90,55 @@ export async function getStoreById(st_id: number): Promise<StoreDetailDTO | null
     }
 }
 
+export async function getStoreRegistrationEmailInput(st_id: number): Promise<StoreRegistrationEmailInput | null> {
+    const [storeRows] = await pool.query<(RowDataPacket & {
+        st_id: number;
+        st_number: string;
+        st_company_name: string;
+        st_email: string;
+        st_phone: string | null;
+        st_status: string;
+    })[]>(
+        `SELECT st_id, st_number, st_company_name, st_email, st_phone, st_status
+         FROM Store
+         WHERE st_id = ?
+         LIMIT 1`,
+        [st_id],
+    );
+    const storeRow = storeRows[0];
+    if (!storeRow) return null;
+
+    const [employeeRows] = await pool.query<(RowDataPacket & {
+        e_firstname: string | null;
+        e_lastname: string | null;
+        e_email: string;
+        e_phone: string | null;
+        e_status: string;
+    })[]>(
+        `SELECT e_firstname, e_lastname, e_email, e_phone, e_status
+         FROM Employees
+         WHERE st_id = ?
+         ORDER BY e_status = 'Owner' DESC, e_id ASC`,
+        [st_id],
+    );
+
+    return {
+        storeId: storeRow.st_id,
+        storeNumber: storeRow.st_number,
+        storeName: storeRow.st_company_name,
+        storeEmail: storeRow.st_email,
+        storePhone: storeRow.st_phone,
+        status: storeRow.st_status,
+        members: employeeRows.map((employee) => ({
+            firstName: employee.e_firstname,
+            lastName: employee.e_lastname,
+            email: employee.e_email,
+            phone: employee.e_phone,
+            role: employee.e_status,
+        })),
+    };
+}
+
 
 
 export async function getStoreByCompanyName(st_data: string): Promise<StoreDTO | null> {
@@ -96,6 +146,14 @@ export async function getStoreByCompanyName(st_data: string): Promise<StoreDTO |
         SELECT st_id, st_company_name, bank_account_number,
          st_email, created_at, st_phone, st_image FROM Store
           WHERE st_company_name = ? Or st_email = ? `, [st_data, st_data]);
+    return rows[0] || null;
+}
+
+export async function getStoreByExactCompanyName(stCompanyName: string): Promise<StoreDTO | null> {
+    const [rows] = await pool.query<(RowDataPacket[]) & StoreDTO[]>(
+        `SELECT st_id, st_company_name, st_email FROM Store WHERE st_company_name = ? LIMIT 1`,
+        [stCompanyName],
+    );
     return rows[0] || null;
 }
 
@@ -347,6 +405,30 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
 
     try {
         await conn.beginTransaction();
+        const existingStoreName = await getStoreByExactCompanyName(input.st_company_name);
+        if (existingStoreName) {
+            throw new ApiError(409, `ชื่อร้านผู้ฝากขาย ${input.st_company_name} ถูกใช้งานแล้ว กรุณาเปลี่ยนชื่อใหม่`);
+        }
+
+        const existingStoreEmail = await getStoreByEmail(input.st_email);
+        if (existingStoreEmail) {
+            throw new ApiError(409, `อีเมลร้านผู้ฝากขาย ${input.st_email} ถูกใช้งานแล้ว กรุณาเปลี่ยนอีเมลใหม่`);
+        }
+
+        const employeeEmails = Array.from(new Set(input.employees.map((emp) => emp.e_email?.trim()).filter(Boolean)));
+        for (const email of employeeEmails) {
+            const existingEmployeeEmail = await getEmployeeByEmail(email);
+            if (existingEmployeeEmail) {
+                throw new ApiError(409, `อีเมลผู้ดูแลร้าน ${email} ถูกใช้งานแล้ว กรุณาเปลี่ยนอีเมลใหม่`);
+            }
+        }
+
+        if (input.employees.some((emp) => !["Owner", "Staff"].includes(emp.e_status))) {
+            throw new ApiError(400, "ผู้ใช้งานร้านต้องเป็นผู้ดูแลร้านผู้ฝากขายหรือพนักงานร้านเท่านั้น");
+        }
+        if (!input.employees.some((emp) => emp.e_status === "Owner")) {
+            throw new ApiError(400, "ร้านต้องมีผู้ดูแลร้านผู้ฝากขายอย่างน้อย 1 คน");
+        }
 
         const st_id = input.st_id; // ได้มาจาก token
         const createdByPlatformStore = await isPlatformStore(st_id);
@@ -506,7 +588,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
 
         if (isDupError(err)) {
             console.log(`Duplicate entry error: ${err}`);
-            throw new ApiError(409, CommonMessages.isExits);
+            throw new ApiError(409, "ชื่อร้านหรืออีเมลนี้ถูกใช้งานแล้ว กรุณาตรวจสอบอีกครั้ง");
         }
         console.error(`Error creating store register: ${err}`);
         throw err;

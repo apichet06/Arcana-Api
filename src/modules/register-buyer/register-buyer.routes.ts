@@ -11,6 +11,8 @@ registerBuyerRouter.post("/google", controller.googleLogin);
 registerBuyerRouter.post("/facebook", controller.facebookLogin);
 registerBuyerRouter.post("/refresh", controller.refresh);
 registerBuyerRouter.post("/logout", controller.logout);
+registerBuyerRouter.post("/forgot-password", controller.forgotPassword);
+registerBuyerRouter.post("/reset-password", controller.resetPassword);
 
 // Protected — ต้องล็อกอินก่อน (BuyerAuth ตรวจ JWT แล้วใส่ req.userId)
 registerBuyerRouter.get("/me", BuyerAuth, controller.getMe);
