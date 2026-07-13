@@ -31,6 +31,35 @@ function mapApplication(row: RawApplicationRow): SellerApplicationDTO {
     };
 }
 
+async function resetApplicationIfStoreWasDeleted(application: SellerApplicationDTO): Promise<SellerApplicationDTO> {
+    if (!application.is_finalized || !application.created_store_id) return application;
+
+    const [storeRows] = await pool.query<RowDataPacket[]>(
+        `SELECT st_id FROM Store WHERE st_id = ? LIMIT 1`,
+        [application.created_store_id],
+    );
+    if (storeRows.length > 0) return application;
+
+    await pool.query(
+        `UPDATE seller_applications
+         SET current_step = 1,
+             completed_steps_json = JSON_ARRAY(),
+             payload_json = JSON_OBJECT(),
+             is_finalized = 0,
+             finalized_at = NULL,
+             created_store_id = NULL,
+             updated_at = ?
+         WHERE id = ?`,
+        [new Date(), application.id],
+    );
+
+    const [rows] = await pool.query<RawApplicationRow[]>(
+        `SELECT * FROM seller_applications WHERE id = ? LIMIT 1`,
+        [application.id],
+    );
+    return rows[0] ? mapApplication(rows[0]) : application;
+}
+
 async function getAccountByProvider(provider: string, providerUserId: string): Promise<SellerApplicationAccountDTO | null> {
     const [rows] = await pool.query<(RowDataPacket & SellerApplicationAccountDTO)[]>(
         `SELECT * FROM seller_application_accounts WHERE provider = ? AND provider_user_id = ? LIMIT 1`,
@@ -44,7 +73,7 @@ async function getApplicationByAccountId(accountId: number): Promise<SellerAppli
         `SELECT * FROM seller_applications WHERE account_id = ? LIMIT 1`,
         [accountId],
     );
-    return rows[0] ? mapApplication(rows[0]) : null;
+    return rows[0] ? resetApplicationIfStoreWasDeleted(mapApplication(rows[0])) : null;
 }
 
 export async function getApplicationSession(applicationId: number, accountId: number): Promise<SellerApplicationSession> {
@@ -59,7 +88,7 @@ export async function getApplicationSession(applicationId: number, accountId: nu
         `SELECT * FROM seller_applications WHERE id = ? AND account_id = ? LIMIT 1`,
         [applicationId, accountId],
     );
-    const application = applicationRows[0] ? mapApplication(applicationRows[0]) : null;
+    const application = applicationRows[0] ? await resetApplicationIfStoreWasDeleted(mapApplication(applicationRows[0])) : null;
     if (!application) throw new ApiError(404, "ไม่พบข้อมูลใบสมัครผู้ขาย");
 
     return { account, application };

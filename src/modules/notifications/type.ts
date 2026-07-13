@@ -25,7 +25,11 @@ export type NotificationInput = {
     ref_type: string
     ref_id: number
     priority?: NotificationPriority
+    /** ส่งสำเนาแจ้งเตือนนี้ไปให้ store ที่เป็น platform store (เจ้าของเว็บไซต์) ด้วยหรือไม่ */
+    notifyPlatform?: boolean
 }
+
+export type PlatformNotificationInput = Omit<NotificationInput, "target_id">
 
 export function mapPriorityToType(status: string) {
     const map: Record<string, string> = {

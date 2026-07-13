@@ -1,5 +1,6 @@
 
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
+import crypto from "crypto";
 import { pool } from "../../db/pool.js";
 import {
     mapDocumetType,
@@ -15,6 +16,113 @@ import type { empDTO } from "../employees/emp.type.js";
 import * as notiService from "../notifications/notification.service.js";
 import type { NotificationInput } from "../notifications/type.js";
 import type { StoreRegistrationEmailInput } from "../../mailer/type.js";
+
+const SELLER_CONFIRMATION_TOKEN_EXPIRES_DAYS = 14;
+const STORE_EMAIL_VERIFICATION_TOKEN_EXPIRES_DAYS = 7;
+
+function hashSellerConfirmationToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+async function ensureSellerConfirmationTable(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS Store_Seller_Confirmation_Tokens (
+            sct_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            st_id INT NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            created_by_emp_id INT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at DATETIME NULL,
+            confirmed_ip VARCHAR(64) NULL,
+            confirmed_user_agent VARCHAR(255) NULL,
+            pdpa_notice_version VARCHAR(100) NULL,
+            PRIMARY KEY (sct_id),
+            UNIQUE KEY uq_store_seller_confirmation_token_hash (token_hash),
+            KEY idx_store_seller_confirmation_st_id (st_id),
+            KEY idx_store_seller_confirmation_expires_at (expires_at)
+        )
+    `);
+}
+
+function hashStoreEmailVerificationToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+async function ensureStoreEmailVerificationTable(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS Store_Email_Verification_Tokens (
+            sevt_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            st_id INT NOT NULL,
+            email VARCHAR(100) NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            created_by_emp_id INT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at DATETIME NULL,
+            confirmed_ip VARCHAR(64) NULL,
+            confirmed_user_agent VARCHAR(255) NULL,
+            PRIMARY KEY (sevt_id),
+            UNIQUE KEY uq_store_email_verification_token_hash (token_hash),
+            KEY idx_store_email_verification_st_id_email (st_id, email),
+            KEY idx_store_email_verification_expires_at (expires_at)
+        )
+    `);
+}
+
+async function ensureEmployeeEmailVerificationTable(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS Employee_Email_Verification_Tokens (
+            eevt_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            e_id INT NOT NULL,
+            email VARCHAR(100) NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            confirmed_at DATETIME NULL,
+            used_at DATETIME NULL,
+            requires_password_setup TINYINT(1) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            request_ip VARCHAR(64) NULL,
+            user_agent VARCHAR(255) NULL,
+            PRIMARY KEY (eevt_id),
+            UNIQUE KEY uq_employee_email_verification_token_hash (token_hash),
+            KEY idx_employee_email_verification_e_id (e_id),
+            KEY idx_employee_email_verification_email (email),
+            KEY idx_employee_email_verification_expires_at (expires_at)
+        )
+    `);
+    try {
+        await pool.query(`
+            ALTER TABLE Employee_Email_Verification_Tokens
+            ADD COLUMN requires_password_setup TINYINT(1) NOT NULL DEFAULT 0 AFTER used_at
+        `);
+    } catch (err) {
+        if ((err as { code?: string }).code !== "ER_DUP_FIELDNAME") {
+            throw err;
+        }
+    }
+}
+
+async function ensureEmployeePasswordResetTable(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS Employee_Password_Reset_Tokens (
+            prt_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            e_id INT NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            request_ip VARCHAR(64) NULL,
+            user_agent VARCHAR(255) NULL,
+            PRIMARY KEY (prt_id),
+            UNIQUE KEY uq_employee_password_reset_token_hash (token_hash),
+            KEY idx_employee_password_reset_e_id (e_id),
+            KEY idx_employee_password_reset_expires_at (expires_at)
+        )
+    `);
+}
 
 async function isPlatformStore(st_id: number): Promise<boolean> {
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -48,8 +156,17 @@ export async function getStoreById(st_id: number): Promise<StoreDetailDTO | null
     // 1. ตรวจว่ามีร้านนี้จริงก่อน — ถ้าไม่มี return null เลย ไม่ต้อง query ต่อ
 
 
+    await ensureStoreEmailVerificationTable();
+
     const [storeRows] = await pool.query<RowDataPacket[] & StoreDTO[]>(
-        `SELECT a.*, b.bk_name
+        `SELECT a.*, b.bk_name,
+                (
+                    SELECT MAX(sevt.confirmed_at)
+                    FROM Store_Email_Verification_Tokens sevt
+                    WHERE sevt.st_id = a.st_id
+                      AND sevt.email = a.st_email
+                      AND sevt.confirmed_at IS NOT NULL
+                ) AS st_email_verified_at
          FROM Store a
          LEFT JOIN Bank b ON a.bk_id = b.bk_id
          WHERE a.st_id = ?`,
@@ -256,6 +373,20 @@ export async function updateStoreStatus(st_id: number, input: { st_status: strin
     try {
         await conn.beginTransaction();
         const { st_status, note } = input;
+        const [currentRows] = await conn.query<(RowDataPacket & { st_status: string })[]>(
+            `SELECT st_status FROM Store WHERE st_id = ? LIMIT 1 FOR UPDATE`,
+            [st_id],
+        );
+        const current = currentRows[0];
+        if (!current) {
+            throw new ApiError(404, CommonMessages.notFound);
+        }
+        if (
+            current.st_status === "PENDING_SELLER_CONFIRMATION" &&
+            !["REJECTED", "SUSPENDED"].includes(st_status)
+        ) {
+            throw new ApiError(400, "ร้านนี้ยังรอผู้ฝากขายยืนยันข้อมูลและ PDPA ผ่านลิงก์ invite");
+        }
 
         const [res] = await conn.query<ResultSetHeader>(`UPDATE Store SET st_status = ? ,st_note = ?, updated_at = ? WHERE st_id = ?`, [st_status, note, new Date(), st_id]);
 
@@ -360,17 +491,15 @@ export async function UploadDocumetDATA(documents: StoreDocumentBackend[], stId:
 
         await conn.query<ResultSetHeader>(`UPDATE Store SET st_status = ? , updated_at = ? WHERE st_id = ?`, ["UPLOAD", new Date(), stId]);
 
-        const notiData: NotificationInput = {
+        await notiService.NotifyPlatformStores({
             target_type: "STORE",
-            target_id: 1,
             type: "NEW_STORE",
             title: "เอกสารประกอบ",
             message: "ส่งเอกสาร รอตรวจสอบ ได้แก่ " + docLabel,
             action_url: "/dashboard/store/dataStore/?st_id=" + stId,
             ref_type: "STORE",
             ref_id: stId,
-        }
-        await notiService.CreateNotification(notiData)
+        })
 
 
         await conn.commit();
@@ -415,6 +544,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
             throw new ApiError(409, `อีเมลร้านผู้ฝากขาย ${input.st_email} ถูกใช้งานแล้ว กรุณาเปลี่ยนอีเมลใหม่`);
         }
 
+        const requiresSellerConfirmation = Boolean(input.requires_seller_confirmation);
         const employeeEmails = Array.from(new Set(input.employees.map((emp) => emp.e_email?.trim()).filter(Boolean)));
         for (const email of employeeEmails) {
             const existingEmployeeEmail = await getEmployeeByEmail(email);
@@ -429,9 +559,17 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
         if (!input.employees.some((emp) => emp.e_status === "Owner")) {
             throw new ApiError(400, "ร้านต้องมีผู้ดูแลร้านผู้ฝากขายอย่างน้อย 1 คน");
         }
+        if (requiresSellerConfirmation && (input.employees.length !== 1 || input.employees[0]?.e_status !== "Owner")) {
+            throw new ApiError(400, "การสร้างร้านโดยแอดมินต้องระบุ Primary Owner เพียง 1 คน");
+        }
 
         const st_id = input.st_id; // ได้มาจาก token
         const createdByPlatformStore = await isPlatformStore(st_id);
+        const initialStatus = requiresSellerConfirmation
+            ? "PENDING_SELLER_CONFIRMATION"
+            : createdByPlatformStore
+                ? "ACTIVE"
+                : "PENDING";
 
 
         // ===== 1. Insert ตาราง stores (ตารางหลัก) =====
@@ -444,7 +582,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
             st_phone: input.st_phone,
             st_image: input.st_image,
             bk_id: input.bk_id,
-            st_status: createdByPlatformStore ? "ACTIVE" : "PENDING",
+            st_status: initialStatus,
             is_platform_store: input.is_platform_store ?? false,
         };
 
@@ -455,9 +593,12 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
 
         // ===== 2. Insert ตาราง store_locations =====
         if (input.locations.length > 0) {
+            const defaultLocationIndex = input.locations.findIndex((loc) => Boolean(loc.is_default));
+            const normalizedDefaultIndex = defaultLocationIndex >= 0 ? defaultLocationIndex : 0;
             let warehouseCount = 1
-            const locationValues = input.locations.map((loc) => {
-                const locName = loc.is_default ? "คลังหลัก" : `คลังย่อย ${warehouseCount++}`
+            const locationValues = input.locations.map((loc, index) => {
+                const isDefault = index === normalizedDefaultIndex;
+                const locName = isDefault ? "คลังหลัก" : `คลังย่อย ${warehouseCount++}`
 
                 return [
                     stId,
@@ -467,7 +608,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
                     loc.loc_district_id,
                     loc.loc_subdistrict_id,
                     loc.loc_zip_code,
-                    loc.is_default,
+                    isDefault,
                 ]
             })
 
@@ -477,7 +618,7 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
             );
         }
 
-        const e_isActive = true; // กำหนดค่าเริ่มต้นให้พนักงานที่ถูกสร้างมาพร้อมกับร้านเป็น active
+        const e_isActive = requiresSellerConfirmation ? false : true; // admin-assisted stores must be confirmed by seller first
 
         // ===== 3. Insert ตาราง store_employees =====
         if (input.employees.length > 0) {
@@ -504,12 +645,16 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
         const owner = input.employees.find(e => e.e_status === 'Owner')
         const logData = {
             st_id: stId,
-            stl_type: mapStatusToType(createdByPlatformStore ? "ACTIVE" : "PENDING"),
-            stl_actor: createdByPlatformStore
+            stl_type: mapStatusToType(initialStatus),
+            stl_actor: requiresSellerConfirmation
+                ? `${eData?.e_status ?? 'Admin'} ${eData?.e_firstname ?? 'Arcana'}`
+                : createdByPlatformStore
                 ? `${eData?.e_status ?? 'Admin'} ${eData?.e_firstname ?? 'Arcana'}`
                 : `${owner?.e_status ?? ''} ${owner?.e_firstname ?? ''}`.trim(),
-            stl_action: mapStatusToAction(createdByPlatformStore ? "ACTIVE" : "PENDING"),
-            stl_node: createdByPlatformStore ? "Admin Arcana Create Store" : "Owner Create Store",
+            stl_action: mapStatusToAction(initialStatus),
+            stl_node: requiresSellerConfirmation
+                ? "Admin created store draft and sent seller confirmation"
+                : createdByPlatformStore ? "Admin Arcana Create Store" : "Owner Create Store",
             stl_timestamp: new Date(),
         }
         await conn.query<ResultSetHeader>(`INSERT INTO Store_Logs SET ?`, [logData])
@@ -598,6 +743,461 @@ export async function createStoreRegister(input: CreateStoreRegisterInput, eData
     }
 }
 
+export type SellerConfirmationSummary = {
+    store: {
+        st_id: number;
+        st_number: string;
+        st_company_name: string;
+        st_email: string;
+        st_phone: string | null;
+        st_status: string;
+    };
+    tax: {
+        legal_name: string;
+        tax_id_number: string;
+        tax_seller_type: string;
+        tax_address: string;
+        tax_zip_code: string;
+    } | null;
+    employees: {
+        e_firstname: string | null;
+        e_lastname: string | null;
+        e_email: string;
+        e_phone: string | null;
+        e_status: string;
+    }[];
+    expires_at: string;
+};
+
+export async function createSellerConfirmationInvite(input: {
+    stId: number;
+    createdByEmpId?: number | null;
+}): Promise<{ token: string; expiresAt: Date }> {
+    await ensureSellerConfirmationTable();
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = hashSellerConfirmationToken(token);
+    const expiresAt = new Date(Date.now() + SELLER_CONFIRMATION_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000);
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query(
+            `UPDATE Store_Seller_Confirmation_Tokens
+             SET used_at = ?
+             WHERE st_id = ? AND used_at IS NULL`,
+            [new Date(), input.stId],
+        );
+        await conn.query(
+            `INSERT INTO Store_Seller_Confirmation_Tokens
+             (st_id, token_hash, expires_at, created_by_emp_id)
+             VALUES (?, ?, ?, ?)`,
+            [input.stId, tokenHash, expiresAt, input.createdByEmpId ?? null],
+        );
+        await conn.commit();
+        return { token, expiresAt };
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function getSellerConfirmationRecipient(stId: number): Promise<{
+    storeName: string;
+    ownerEmail: string;
+}> {
+    const [storeRows] = await pool.query<(RowDataPacket & {
+        st_company_name: string;
+        st_status: string;
+    })[]>(
+        `SELECT st_company_name, st_status
+         FROM Store
+         WHERE st_id = ?
+         LIMIT 1`,
+        [stId],
+    );
+    const storeRow = storeRows[0];
+    if (!storeRow) throw new ApiError(404, CommonMessages.notFound);
+    if (storeRow.st_status !== "PENDING_SELLER_CONFIRMATION") {
+        throw new ApiError(400, "ร้านนี้ไม่อยู่ในสถานะรอผู้ขายยืนยัน");
+    }
+
+    const [ownerRows] = await pool.query<(RowDataPacket & { e_email: string })[]>(
+        `SELECT e_email
+         FROM Employees
+         WHERE st_id = ? AND e_status = 'Owner'
+         ORDER BY e_id ASC
+         LIMIT 1`,
+        [stId],
+    );
+    const ownerEmail = String(ownerRows[0]?.e_email ?? "").trim();
+    if (!ownerEmail) {
+        throw new ApiError(400, "ไม่พบอีเมล Owner สำหรับส่งลิงก์ยืนยันร้าน");
+    }
+
+    return {
+        storeName: storeRow.st_company_name,
+        ownerEmail,
+    };
+}
+
+export async function createStoreEmailVerificationInvite(input: {
+    stId: number;
+    createdByEmpId?: number | null;
+}): Promise<{ token: string; expiresAt: Date; email: string; storeName: string }> {
+    await ensureStoreEmailVerificationTable();
+    const [storeRows] = await pool.query<(RowDataPacket & {
+        st_company_name: string;
+        st_email: string;
+    })[]>(
+        `SELECT st_company_name, st_email
+         FROM Store
+         WHERE st_id = ?
+         LIMIT 1`,
+        [input.stId],
+    );
+    const storeRow = storeRows[0];
+    if (!storeRow) throw new ApiError(404, CommonMessages.notFound);
+
+    const email = String(storeRow.st_email ?? "").trim();
+    if (!email) {
+        throw new ApiError(400, "ไม่พบอีเมลร้านสำหรับส่งลิงก์ยืนยัน");
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = hashStoreEmailVerificationToken(token);
+    const expiresAt = new Date(Date.now() + STORE_EMAIL_VERIFICATION_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000);
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query(
+            `UPDATE Store_Email_Verification_Tokens
+             SET used_at = ?
+             WHERE st_id = ? AND email = ? AND used_at IS NULL AND confirmed_at IS NULL`,
+            [new Date(), input.stId, email],
+        );
+        await conn.query(
+            `INSERT INTO Store_Email_Verification_Tokens
+             (st_id, email, token_hash, expires_at, created_by_emp_id)
+             VALUES (?, ?, ?, ?, ?)`,
+            [input.stId, email, tokenHash, expiresAt, input.createdByEmpId ?? null],
+        );
+        await conn.commit();
+        return {
+            token,
+            expiresAt,
+            email,
+            storeName: storeRow.st_company_name,
+        };
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+export async function confirmStoreEmail(input: {
+    token: string;
+    ip?: string | null;
+    userAgent?: string | null;
+}): Promise<{ storeId: number; storeName: string; email: string }> {
+    await ensureStoreEmailVerificationTable();
+    const tokenHash = hashStoreEmailVerificationToken(input.token);
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+        const [tokenRows] = await conn.query<(RowDataPacket & {
+            sevt_id: number;
+            st_id: number;
+            email: string;
+            expires_at: Date;
+            used_at: Date | null;
+            confirmed_at: Date | null;
+        })[]>(
+            `SELECT sevt_id, st_id, email, expires_at, used_at, confirmed_at
+             FROM Store_Email_Verification_Tokens
+             WHERE token_hash = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [tokenHash],
+        );
+        const tokenRow = tokenRows[0];
+        if (!tokenRow || tokenRow.used_at || tokenRow.confirmed_at || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+            throw new ApiError(400, "ลิงก์ยืนยันอีเมลร้านไม่ถูกต้องหรือหมดอายุแล้ว");
+        }
+
+        const [storeRows] = await conn.query<(RowDataPacket & {
+            st_company_name: string;
+            st_email: string;
+        })[]>(
+            `SELECT st_company_name, st_email
+             FROM Store
+             WHERE st_id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [tokenRow.st_id],
+        );
+        const storeRow = storeRows[0];
+        if (!storeRow) throw new ApiError(404, CommonMessages.notFound);
+        if (String(storeRow.st_email ?? "").trim() !== tokenRow.email) {
+            throw new ApiError(400, "อีเมลร้านถูกเปลี่ยนแล้ว กรุณาส่งลิงก์ยืนยันใหม่");
+        }
+
+        const confirmedAt = new Date();
+        await conn.query(
+            `UPDATE Store_Email_Verification_Tokens
+             SET used_at = ?, confirmed_at = ?, confirmed_ip = ?, confirmed_user_agent = ?
+             WHERE sevt_id = ?`,
+            [
+                confirmedAt,
+                confirmedAt,
+                input.ip ?? null,
+                input.userAgent ? input.userAgent.slice(0, 255) : null,
+                tokenRow.sevt_id,
+            ],
+        );
+        await conn.query<ResultSetHeader>(
+            `INSERT INTO Store_Logs SET ?`,
+            [{
+                st_id: tokenRow.st_id,
+                stl_type: "PENDING",
+                stl_actor: "Store",
+                stl_action: "ยืนยันอีเมลร้าน",
+                stl_node: `Store email verified: ${tokenRow.email}`,
+                stl_timestamp: confirmedAt,
+            }],
+        );
+
+        await conn.commit();
+
+        const notiData: NotificationInput = {
+            target_type: "STORE",
+            target_id: tokenRow.st_id,
+            type: "STORE_EMAIL_VERIFIED",
+            title: "อีเมลร้านได้รับการยืนยันแล้ว",
+            message: `ร้าน ${storeRow.st_company_name} ยืนยันอีเมล ${tokenRow.email} แล้ว`,
+            action_url: "/dashboard/myShop/",
+            ref_type: "STORE",
+            ref_id: tokenRow.st_id,
+            priority: "NORMAL",
+        };
+        notiService.CreateNotification(notiData).catch((error) => {
+            console.warn(`[stores] create store email verification notification failed for store ${tokenRow.st_id}:`, error);
+        });
+
+        return {
+            storeId: tokenRow.st_id,
+            storeName: storeRow.st_company_name,
+            email: tokenRow.email,
+        };
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
+async function getSellerConfirmationTokenRow(tokenHash: string) {
+    await ensureSellerConfirmationTable();
+    const [rows] = await pool.query<(RowDataPacket & {
+        sct_id: number;
+        st_id: number;
+        expires_at: Date;
+        used_at: Date | null;
+    })[]>(
+        `SELECT sct_id, st_id, expires_at, used_at
+         FROM Store_Seller_Confirmation_Tokens
+         WHERE token_hash = ?
+         LIMIT 1`,
+        [tokenHash],
+    );
+    return rows[0] ?? null;
+}
+
+export async function getSellerConfirmationSummary(token: string): Promise<SellerConfirmationSummary> {
+    const tokenRow = await getSellerConfirmationTokenRow(hashSellerConfirmationToken(token));
+    if (!tokenRow || tokenRow.used_at || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+        throw new ApiError(400, "ลิงก์ยืนยันร้านไม่ถูกต้องหรือหมดอายุแล้ว");
+    }
+
+    const [storeRows] = await pool.query<(RowDataPacket & SellerConfirmationSummary["store"])[]>(
+        `SELECT st_id, st_number, st_company_name, st_email, st_phone, st_status
+         FROM Store
+         WHERE st_id = ?
+         LIMIT 1`,
+        [tokenRow.st_id],
+    );
+    const storeRow = storeRows[0];
+    if (!storeRow) throw new ApiError(404, CommonMessages.notFound);
+    if (storeRow.st_status !== "PENDING_SELLER_CONFIRMATION") {
+        throw new ApiError(400, "ร้านนี้ยืนยันข้อมูลแล้วหรือไม่อยู่ในสถานะรอผู้ขายยืนยัน");
+    }
+
+    const [taxRows] = await pool.query<(RowDataPacket & NonNullable<SellerConfirmationSummary["tax"]>)[]>(
+        `SELECT legal_name, tax_id_number, tax_seller_type, tax_address, tax_zip_code
+         FROM Store_Tax_Profile
+         WHERE st_id = ?
+         LIMIT 1`,
+        [tokenRow.st_id],
+    );
+    const [employeeRows] = await pool.query<(RowDataPacket & SellerConfirmationSummary["employees"][number])[]>(
+        `SELECT e_firstname, e_lastname, e_email, e_phone, e_status
+         FROM Employees
+         WHERE st_id = ?
+         ORDER BY e_status = 'Owner' DESC, e_id ASC`,
+        [tokenRow.st_id],
+    );
+
+    return {
+        store: storeRow,
+        tax: taxRows[0] ?? null,
+        employees: employeeRows,
+        expires_at: new Date(tokenRow.expires_at).toISOString(),
+    };
+}
+
+export async function confirmSellerStore(input: {
+    token: string;
+    ownerPasswordHash: string;
+    pdpaNoticeVersion: string;
+    ip?: string | null;
+    userAgent?: string | null;
+}): Promise<number> {
+    await ensureSellerConfirmationTable();
+    await ensureEmployeeEmailVerificationTable();
+    const tokenHash = hashSellerConfirmationToken(input.token);
+    const conn = await pool.getConnection();
+
+    try {
+        await conn.beginTransaction();
+        const [tokenRows] = await conn.query<(RowDataPacket & {
+            sct_id: number;
+            st_id: number;
+            expires_at: Date;
+            used_at: Date | null;
+        })[]>(
+            `SELECT sct_id, st_id, expires_at, used_at
+             FROM Store_Seller_Confirmation_Tokens
+             WHERE token_hash = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [tokenHash],
+        );
+        const tokenRow = tokenRows[0];
+        if (!tokenRow || tokenRow.used_at || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+            throw new ApiError(400, "ลิงก์ยืนยันร้านไม่ถูกต้องหรือหมดอายุแล้ว");
+        }
+
+        const [storeRows] = await conn.query<(RowDataPacket & { st_status: string; st_company_name: string })[]>(
+            `SELECT st_status, st_company_name FROM Store WHERE st_id = ? LIMIT 1 FOR UPDATE`,
+            [tokenRow.st_id],
+        );
+        const storeRow = storeRows[0];
+        if (!storeRow) throw new ApiError(404, CommonMessages.notFound);
+        if (storeRow.st_status !== "PENDING_SELLER_CONFIRMATION") {
+            throw new ApiError(400, "ร้านนี้ยืนยันข้อมูลแล้วหรือไม่อยู่ในสถานะรอผู้ขายยืนยัน");
+        }
+        const [ownerRows] = await conn.query<(RowDataPacket & { e_id: number; e_email: string })[]>(
+            `SELECT e_id, e_email
+             FROM Employees
+             WHERE st_id = ? AND e_status = 'Owner'
+             ORDER BY e_id ASC`,
+            [tokenRow.st_id],
+        );
+        const owner = ownerRows[0];
+        if (ownerRows.length !== 1 || !owner) {
+            throw new ApiError(400, "ร้านที่รอยืนยันต้องมี Owner หลักเพียง 1 คน");
+        }
+
+        await conn.query(
+            `UPDATE Store
+             SET st_status = ?, updated_at = ?
+             WHERE st_id = ?`,
+            ["PENDING", new Date(), tokenRow.st_id],
+        );
+        const [ownerResult] = await conn.query<ResultSetHeader>(
+            `UPDATE Employees
+             SET e_password = ?, e_isActive = 1
+             WHERE e_id = ?`,
+            [input.ownerPasswordHash, owner.e_id],
+        );
+        if (ownerResult.affectedRows !== 1) {
+            throw new ApiError(400, "ร้านที่รอยืนยันต้องมี Owner หลักเพียง 1 คน");
+        }
+        await conn.query(
+            `UPDATE Store_Seller_Confirmation_Tokens
+             SET used_at = ?, confirmed_at = ?, confirmed_ip = ?, confirmed_user_agent = ?, pdpa_notice_version = ?
+             WHERE sct_id = ?`,
+            [
+                new Date(),
+                new Date(),
+                input.ip ?? null,
+                input.userAgent ? input.userAgent.slice(0, 255) : null,
+                input.pdpaNoticeVersion,
+                tokenRow.sct_id,
+            ],
+        );
+        const employeeEmailVerificationTokenHash = crypto
+            .createHash("sha256")
+            .update(`seller-confirmed-owner-email:${owner.e_id}:${owner.e_email}:${tokenRow.sct_id}`)
+            .digest("hex");
+        await conn.query(
+            `INSERT INTO Employee_Email_Verification_Tokens
+             (e_id, email, token_hash, expires_at, confirmed_at, used_at, requires_password_setup, request_ip, user_agent)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                owner.e_id,
+                owner.e_email,
+                employeeEmailVerificationTokenHash,
+                new Date(),
+                new Date(),
+                new Date(),
+                0,
+                input.ip ?? null,
+                input.userAgent ? input.userAgent.slice(0, 255) : null,
+            ],
+        );
+        await conn.query<ResultSetHeader>(
+            `INSERT INTO Store_Logs SET ?`,
+            [{
+                st_id: tokenRow.st_id,
+                stl_type: "PENDING",
+                stl_actor: "Seller",
+                stl_action: "ผู้ฝากขายยืนยันข้อมูลและ PDPA",
+                stl_node: `Seller confirmed invite for ${storeRow.st_company_name}`,
+                stl_timestamp: new Date(),
+            }],
+        );
+
+        await conn.commit();
+
+        notiService.NotifyPlatformStores({
+            target_type: "STORE",
+            type: "SELLER_PDPA_CONFIRMED",
+            title: "ผู้ฝากขายยืนยัน PDPA แล้ว",
+            message: `ร้าน ${storeRow.st_company_name} ยืนยันข้อมูลและ PDPA แล้ว รอตรวจสอบ`,
+            action_url: `/dashboard/store/dataStore/?st_id=${tokenRow.st_id}`,
+            ref_type: "STORE",
+            ref_id: tokenRow.st_id,
+            priority: "HIGH",
+        }).catch((error) => {
+            console.warn(`[stores] create seller PDPA confirmation notification failed for store ${tokenRow.st_id}:`, error);
+        });
+
+        return tokenRow.st_id;
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
 // export async function CreateStore(input: CreateStoreInput): Promise<number> {
 //     try {
 
@@ -665,6 +1265,35 @@ export async function deleteStore(st_id: number): Promise<void> {
 
     try {
         await conn.beginTransaction();
+        await ensureSellerConfirmationTable();
+        await ensureStoreEmailVerificationTable();
+        await ensureEmployeeEmailVerificationTable();
+        await ensureEmployeePasswordResetTable();
+
+        const [employeeRows] = await conn.query<(RowDataPacket & { e_id: number })[]>(
+            `SELECT e_id FROM Employees WHERE st_id = ?`,
+            [st_id],
+        );
+        const employeeIds = employeeRows.map((employee) => Number(employee.e_id)).filter(Boolean);
+
+        await conn.query<ResultSetHeader>(
+            `DELETE FROM Notifications
+             WHERE (target_type = 'STORE' AND target_id = ?)
+                OR (ref_type = 'STORE' AND ref_id = ?)`,
+            [st_id, st_id],
+        );
+
+        await conn.query<ResultSetHeader>(`DELETE FROM Store_Email_Verification_Tokens WHERE st_id = ?`, [st_id]);
+
+        await conn.query<ResultSetHeader>(`DELETE FROM Store_Seller_Confirmation_Tokens WHERE st_id = ?`, [st_id]);
+
+        if (employeeIds.length > 0) {
+            await conn.query<ResultSetHeader>(`DELETE FROM Employee_Email_Verification_Tokens WHERE e_id IN (?)`, [employeeIds]);
+
+            await conn.query<ResultSetHeader>(`DELETE FROM Employee_Password_Reset_Tokens WHERE e_id IN (?)`, [employeeIds]);
+        }
+
+        await conn.query<ResultSetHeader>(`DELETE FROM seller_applications WHERE created_store_id = ?`, [st_id]);
 
         await conn.query<ResultSetHeader>(`DELETE FROM Locations WHERE st_id = ?`, [st_id]);
 

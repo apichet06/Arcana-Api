@@ -1,4 +1,5 @@
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import * as store from "./store.service.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
@@ -7,7 +8,14 @@ import * as fs from "fs";
 import * as pathfile from "path";
 import { findByEmpId } from '../employees/emp.service.js';
 import type { empDTO } from '../employees/emp.type.js';
+import { sendSellerConfirmationEmail, sendStoreEmailVerificationEmail, sendStoreRegistrationEmail } from '../../mailer/mailer.js';
+import { ApiError } from '../../shared/errors/ApiError.js';
 
+const SELLER_PDPA_NOTICE_VERSION = "seller-admin-invite-pdpa-v1";
+
+function getBackofficeUrl(): string {
+    return process.env.BACKOFFICE_URL?.trim().replace(/\/+$/, "") || "http://localhost:3000";
+}
 
 export const list = asyncHandler(async (req, res) => {
     const data = await store.listStores();
@@ -263,12 +271,18 @@ export const createRegister = asyncHandler(async (req, res) => {
         const stId = Number(req.storeId);
         const eData = empId ? await findByEmpId(empId) as empDTO : undefined;
 
-        const password = "arcana@!234";
+        const password = crypto.randomBytes(24).toString("hex");
         const hashedPassword = await bcrypt.hash(password, 10);
         const employeesWithPassword = employees.map((emp: any) => ({
             ...emp,
             e_password: hashedPassword,
         }));
+        const ownerEmployee = employeesWithPassword.find((emp: any) => emp.e_status === "Owner");
+        const ownerEmail = String(ownerEmployee?.e_email ?? "").trim();
+
+        if (!ownerEmail) {
+            throw new ApiError(400, "กรุณาระบุอีเมล Owner สำหรับส่งลิงก์ยืนยันร้าน");
+        }
 
         const input = {
             st_company_name: req.body.st_company_name,
@@ -296,15 +310,152 @@ export const createRegister = asyncHandler(async (req, res) => {
             employees: employeesWithPassword,
             documents,
             st_id: stId,
+            requires_seller_confirmation: true,
         };
 
         const id = await store.createStoreRegister(input, eData);
+        const invite = await store.createSellerConfirmationInvite({
+            stId: id,
+            createdByEmpId: empId || null,
+        });
+        const confirmUrl = `${getBackofficeUrl()}/seller-confirmation?token=${encodeURIComponent(invite.token)}`;
 
-        return res.status(201).json({ message: CommonMessages.insertSuccess, id, });
+        sendSellerConfirmationEmail({
+            email: ownerEmail,
+            storeName: req.body.st_company_name,
+            confirmUrl,
+            expiresAt: invite.expiresAt,
+        }).catch((error) => {
+            console.warn(`[stores] send seller confirmation email failed for store ${id} to ${ownerEmail}:`, error);
+        });
+        store.createStoreEmailVerificationInvite({
+            stId: id,
+            createdByEmpId: empId || null,
+        }).then((storeEmailInvite) => {
+            const verifyUrl = `${getBackofficeUrl()}/store-email-confirmation?token=${encodeURIComponent(storeEmailInvite.token)}`;
+            return sendStoreEmailVerificationEmail({
+                email: storeEmailInvite.email,
+                storeName: storeEmailInvite.storeName,
+                verifyUrl,
+                expiresAt: storeEmailInvite.expiresAt,
+            });
+        }).catch((error) => {
+            console.warn(`[stores] send store email verification failed for store ${id}:`, error);
+        });
+
+        return res.status(201).json({ message: CommonMessages.insertSuccess, id, confirmation_sent: true, confirmation_email: ownerEmail });
     } catch (error) {
         cleanupSavedFiles(savedPaths);
         throw error;
     }
+});
+
+export const getSellerConfirmation = asyncHandler(async (req, res) => {
+    const token = String(req.params.token ?? "").trim();
+    if (!token) throw new ApiError(400, "ไม่พบ token ยืนยันร้าน");
+
+    const data = await store.getSellerConfirmationSummary(token);
+    res.status(200).json({ data });
+});
+
+export const confirmSellerConfirmation = asyncHandler(async (req, res) => {
+    const token = String(req.params.token ?? "").trim();
+    const pdpaAccepted = req.body?.pdpa_accepted === true || req.body?.pdpa_accepted === "true";
+    const password = String(req.body?.password ?? "");
+    const confirmPassword = String(req.body?.confirm_password ?? req.body?.confirmPassword ?? "");
+    if (!token) throw new ApiError(400, "ไม่พบ token ยืนยันร้าน");
+    if (!pdpaAccepted) throw new ApiError(400, "กรุณายอมรับนโยบายความเป็นส่วนตัวก่อนยืนยันข้อมูล");
+    if (!password || !confirmPassword) throw new ApiError(400, "กรุณาตั้งรหัสผ่าน Owner");
+    if (password.length < 8) throw new ApiError(400, "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร");
+    if (password !== confirmPassword) throw new ApiError(400, "รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน");
+
+    const ownerPasswordHash = await bcrypt.hash(password, 10);
+
+    const storeId = await store.confirmSellerStore({
+        token,
+        ownerPasswordHash,
+        pdpaNoticeVersion: SELLER_PDPA_NOTICE_VERSION,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+    });
+
+    store.getStoreRegistrationEmailInput(storeId)
+        .then((emailInput) => {
+            if (!emailInput) return;
+            return sendStoreRegistrationEmail(emailInput);
+        })
+        .catch((error) => {
+            console.warn(`[stores] send confirmed registration email failed for store ${storeId}:`, error);
+        });
+
+    res.status(200).json({ message: "ยืนยันข้อมูลร้านเรียบร้อยแล้ว", id: storeId });
+});
+
+export const resendSellerConfirmation = asyncHandler(async (req, res) => {
+    const stId = Number(req.params.st_id);
+    if (!Number.isFinite(stId)) throw new ApiError(400, "รหัสร้านไม่ถูกต้อง");
+
+    const empId = Number(req.empId);
+    const recipient = await store.getSellerConfirmationRecipient(stId);
+    const invite = await store.createSellerConfirmationInvite({
+        stId,
+        createdByEmpId: Number.isFinite(empId) ? empId : null,
+    });
+    const confirmUrl = `${getBackofficeUrl()}/seller-confirmation?token=${encodeURIComponent(invite.token)}`;
+
+    await sendSellerConfirmationEmail({
+        email: recipient.ownerEmail,
+        storeName: recipient.storeName,
+        confirmUrl,
+        expiresAt: invite.expiresAt,
+    });
+
+    res.status(200).json({
+        message: "ส่งลิงก์ยืนยันร้านซ้ำเรียบร้อยแล้ว",
+        confirmation_email: recipient.ownerEmail,
+        expires_at: invite.expiresAt.toISOString(),
+    });
+});
+
+export const resendStoreEmailVerification = asyncHandler(async (req, res) => {
+    const stId = Number(req.params.st_id);
+    if (!Number.isFinite(stId)) throw new ApiError(400, "รหัสร้านไม่ถูกต้อง");
+
+    const empId = Number(req.empId);
+    const invite = await store.createStoreEmailVerificationInvite({
+        stId,
+        createdByEmpId: Number.isFinite(empId) ? empId : null,
+    });
+    const verifyUrl = `${getBackofficeUrl()}/store-email-confirmation?token=${encodeURIComponent(invite.token)}`;
+
+    await sendStoreEmailVerificationEmail({
+        email: invite.email,
+        storeName: invite.storeName,
+        verifyUrl,
+        expiresAt: invite.expiresAt,
+    });
+
+    res.status(200).json({
+        message: "ส่งลิงก์ยืนยันอีเมลร้านเรียบร้อยแล้ว",
+        verification_email: invite.email,
+        expires_at: invite.expiresAt.toISOString(),
+    });
+});
+
+export const confirmStoreEmail = asyncHandler(async (req, res) => {
+    const token = String(req.params.token ?? "").trim();
+    if (!token) throw new ApiError(400, "ไม่พบ token ยืนยันอีเมลร้าน");
+
+    const data = await store.confirmStoreEmail({
+        token,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+    });
+
+    res.status(200).json({
+        message: "ยืนยันอีเมลร้านเรียบร้อยแล้ว",
+        data,
+    });
 });
 
 

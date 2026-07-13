@@ -1,8 +1,9 @@
-export type StoreStatus = "PENDING" | "ACTIVE" | "SUSPENDED" | "REJECTED" | "UPLOAD" | "REQUEST";
+export type StoreStatus = "PENDING" | "ACTIVE" | "SUSPENDED" | "REJECTED" | "UPLOAD" | "REQUEST" | "PENDING_SELLER_CONFIRMATION";
 
 export function mapStatusToType(status: string) {
     const map: Record<string, string> = {
         PENDING: "PENDING",
+        PENDING_SELLER_CONFIRMATION: "PENDING_SELLER_CONFIRMATION",
         ACTIVE: 'ACTIVE',
         SUSPENDED: 'SUSPENDED',
         REJECTED: 'REJECTED',
@@ -15,6 +16,7 @@ export function mapStatusToType(status: string) {
 export function mapStatusToAction(status: string) {
     const map: Record<string, string> = {
         PENDING: 'ส่งคำขอเปิดร้าน',
+        PENDING_SELLER_CONFIRMATION: 'รอผู้ฝากขายยืนยันข้อมูลและ PDPA',
         ACTIVE: 'อนุมัติ พร้อมใช้งาน',
         REJECTED: 'ตีกลับคำขอ',
         REQUEST_MORE: 'ขอเอกสารเพิ่มเติม',
@@ -53,6 +55,7 @@ export type StoreDTO = {
     bank_account_number: string;
     omise_recipient_id: string | null;
     st_email: string;
+    st_email_verified_at?: string | Date | null;
     created_at: string;
     st_phone: string;
     st_image: string;
@@ -131,6 +134,7 @@ export interface CreateStoreRegisterInput {
     tax_seller_type: SellerType;
     st_status: string;
     is_platform_store?: boolean;
+    requires_seller_confirmation?: boolean;
 
 
     legal_name: string;

@@ -7,13 +7,19 @@ import bcrypt from "bcrypt";
 import { AuthMessages } from "../../shared/messages/auth.messages.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
 import crypto from "crypto";
-import { sendEmployeePasswordResetEmail } from "../../mailer/mailer.js";
+import { sendEmployeeEmailVerificationEmail, sendEmployeePasswordResetEmail } from "../../mailer/mailer.js";
 
 const PASSWORD_RESET_EXPIRES_MINUTES = 30;
 const FORGOT_PASSWORD_MESSAGE = "หากอีเมลนี้อยู่ในระบบ เราได้ส่งลิงก์ตั้งรหัสผ่านใหม่ให้แล้ว";
 
 function hashResetToken(token: string): string {
     return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function buildBackofficeUrl(path: string): string | null {
+    const backofficeUrl = process.env.BACKOFFICE_URL?.trim();
+    if (!backofficeUrl) return null;
+    return `${backofficeUrl.replace(/\/+$/, "")}${path}`;
 }
 
 function employeeDisplayName(employee: { e_firstname?: string | null; e_lastname?: string | null }): string | null {
@@ -38,12 +44,15 @@ export const login = asyncHandler(async (req, res) => {
     if (!employee) {
         return res.status(404).json({ message: CommonMessages.notFound });
     }
+    if (!employee.e_isActive) {
+        return res.status(403).json({ message: AuthMessages.resign });
+    }
+    if (!employee.e_email_verified_at) {
+        return res.status(403).json({ message: AuthMessages.emailNotVerified });
+    }
     const isMatch = await bcrypt.compare(password, employee.e_password);
     if (!isMatch) {
         return res.status(400).json({ message: AuthMessages.invalidPassword });
-    }
-    if (!employee.e_isActive) {
-        return res.status(403).json({ message: AuthMessages.resign });
     }
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
@@ -122,22 +131,144 @@ export const resetPassword = asyncHandler(async (req, res) => {
 
 export const createFullAdmin = asyncHandler(async (req, res) => {
     const { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_add_name, e_status, st_id } = req.body;
-    const password = "arcana@!234";
-    const hashePassword = await bcrypt.hash(password, 10);
-    const employee = { e_firstname, e_lastname, e_password: hashePassword, e_email, e_phone, e_isActive, e_add_name, e_status, st_id };
-    await emp.CreateEmpAdmins(employee);
-    res.status(201).json({ message: CommonMessages.insertSuccess });
+    const temporaryPasswordHash = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
+    const employee = { e_firstname, e_lastname, e_password: temporaryPasswordHash, e_email: String(e_email ?? "").trim().toLowerCase(), e_phone, e_isActive: "1", e_add_name, e_status, st_id };
+    const employeeId = await emp.CreateEmpAdmins(employee);
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const invite = await emp.createEmployeeEmailVerificationInvite({
+        e_id: employeeId,
+        tokenHash: hashResetToken(token),
+        requiresPasswordSetup: true,
+        requestIp: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+    });
+    const verifyUrl = buildBackofficeUrl(`/employee-email-confirmation?token=${encodeURIComponent(token)}`);
+    if (verifyUrl) {
+        await sendEmployeeEmailVerificationEmail({
+            email: invite.email,
+            name: invite.name,
+            storeName: invite.storeName,
+            role: invite.role,
+            verifyUrl,
+            expiresAt: invite.expiresAt,
+        });
+    } else {
+        console.warn("[employee-email-verification] skipped email: BACKOFFICE_URL is missing");
+    }
+
+    res.status(201).json({ message: CommonMessages.insertSuccess, verification_email: invite.email });
 
 })
 
 export const updatefullAdmin = asyncHandler(async (req, res) => {
     const { e_id } = req.params;
     const { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id } = req.body;
-    const employee = { e_firstname, e_lastname, e_email, e_phone, e_isActive, e_upd_name, e_status, st_id };
+    const current = await emp.findByEmpId(Number(e_id));
+    const normalizedEmail = String(e_email ?? "").trim().toLowerCase();
+    const emailChanged = Boolean(current && normalizedEmail && normalizedEmail !== current.e_email.trim().toLowerCase());
+    const employee = { e_firstname, e_lastname, e_email: normalizedEmail, e_phone, e_isActive, e_upd_name, e_status, st_id };
     await emp.UpdateEmpAdmins(Number(e_id), employee);
-    res.status(200).json({ message: CommonMessages.updateSuccess });
+
+    let verificationEmail: string | null = null;
+    if (emailChanged) {
+        const token = crypto.randomBytes(32).toString("hex");
+        const invite = await emp.createEmployeeEmailVerificationInvite({
+            e_id: Number(e_id),
+            tokenHash: hashResetToken(token),
+            requiresPasswordSetup: !current?.e_email_verified_at,
+            requestIp: req.ip ?? null,
+            userAgent: req.get("user-agent") ?? null,
+        });
+        const verifyUrl = buildBackofficeUrl(`/employee-email-confirmation?token=${encodeURIComponent(token)}`);
+        if (verifyUrl) {
+            await sendEmployeeEmailVerificationEmail({
+                email: invite.email,
+                name: invite.name,
+                storeName: invite.storeName,
+                role: invite.role,
+                verifyUrl,
+                expiresAt: invite.expiresAt,
+            });
+            verificationEmail = invite.email;
+        } else {
+            console.warn("[employee-email-verification] skipped email: BACKOFFICE_URL is missing");
+        }
+    }
+
+    res.status(200).json({ message: CommonMessages.updateSuccess, verification_email: verificationEmail });
 
 })
+
+export const resendEmailVerification = asyncHandler(async (req, res) => {
+    const { e_id } = req.params;
+    const current = await emp.findByEmpId(Number(e_id));
+    const token = crypto.randomBytes(32).toString("hex");
+    const invite = await emp.createEmployeeEmailVerificationInvite({
+        e_id: Number(e_id),
+        tokenHash: hashResetToken(token),
+        requiresPasswordSetup: !current?.e_email_verified_at,
+        requestIp: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+    });
+    const verifyUrl = buildBackofficeUrl(`/employee-email-confirmation?token=${encodeURIComponent(token)}`);
+    if (!verifyUrl) {
+        throw new ApiError(500, "BACKOFFICE_URL is missing");
+    }
+
+    await sendEmployeeEmailVerificationEmail({
+        email: invite.email,
+        name: invite.name,
+        storeName: invite.storeName,
+        role: invite.role,
+        verifyUrl,
+        expiresAt: invite.expiresAt,
+    });
+
+    res.status(200).json({ message: "ส่งลิงก์ยืนยันอีเมลสำเร็จ", verification_email: invite.email, expires_at: invite.expiresAt });
+});
+
+export const getEmailVerification = asyncHandler(async (req, res) => {
+    const { token } = req.params;
+    const data = await emp.getEmployeeEmailVerificationSummary(hashResetToken(String(token ?? "")));
+
+    res.status(200).json({
+        data: {
+            email: data.email,
+            name: data.name,
+            storeName: data.storeName,
+            role: data.role,
+            expiresAt: data.expiresAt,
+            requiresPasswordSetup: data.requiresPasswordSetup,
+        },
+    });
+});
+
+export const confirmEmailVerification = asyncHandler(async (req, res) => {
+    const { token } = req.params;
+    const password = String(req.body?.password ?? "");
+    const confirmPassword = String(req.body?.confirmPassword ?? req.body?.confirm_password ?? "");
+    let passwordHash: string | null = null;
+
+    if (password || confirmPassword) {
+        if (password !== confirmPassword) {
+            throw new ApiError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน");
+        }
+        if (password.length < 8) {
+            throw new ApiError(400, "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร");
+        }
+        passwordHash = await bcrypt.hash(password, 10);
+    }
+
+    const result = await emp.confirmEmployeeEmail({
+        tokenHash: hashResetToken(String(token ?? "")),
+        passwordHash,
+        requestIp: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+    });
+
+    res.status(200).json({ message: "ยืนยันอีเมลผู้ใช้งานสำเร็จ", data: result });
+});
 
 export const changePassword = asyncHandler(async (req, res) => {
     const { e_id } = req.params;

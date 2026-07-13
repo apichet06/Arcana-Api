@@ -17,6 +17,7 @@ export type empDTO = {
     st_id: number,
     st_image: string;
     is_platform_store: boolean | 0 | 1 | "0" | "1";
+    e_email_verified_at?: string | Date | null;
 }
 
 export type CreateEmpInput = {

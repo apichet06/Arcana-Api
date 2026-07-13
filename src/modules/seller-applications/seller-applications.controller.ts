@@ -1,21 +1,34 @@
 import jwt from "jsonwebtoken";
 import type { Request } from "express";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
 import * as service from "./seller-applications.service.js";
 import * as store from "../stores/store.service.js";
+import * as empService from "../employees/emp.service.js";
 import { CommonMessages } from "../../shared/messages/common.messages.js";
 import { cleanupSavedFiles, fileUploadImage } from "../../shared/middlewares/fileUploadImage.js";
 import type { SellerApplicationSession, SellerApplicationTokenPayload } from "./seller-applications.type.js";
-import { sendStoreRegistrationEmail } from "../../mailer/mailer.js";
+import { sendEmployeeEmailVerificationEmail, sendStoreEmailVerificationEmail, sendStoreRegistrationEmail } from "../../mailer/mailer.js";
 
 const SELLER_APPLICATION_TOKEN_EXPIRES_IN = "7d";
+const SELLER_PDPA_NOTICE_VERSION = "seller-registration-pdpa-v1";
 
 function signSellerApplicationToken(payload: SellerApplicationTokenPayload): string {
     const secret = process.env.JWT_SECRET;
     if (!secret) throw new ApiError(500, "JWT_SECRET is not defined");
     return jwt.sign(payload, secret, { expiresIn: SELLER_APPLICATION_TOKEN_EXPIRES_IN });
+}
+
+function hashEmailVerificationToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function buildBackofficeUrl(path: string): string | null {
+    const backofficeUrl = process.env.BACKOFFICE_URL?.trim();
+    if (!backofficeUrl) return null;
+    return `${backofficeUrl.replace(/\/+$/, "")}${path}`;
 }
 
 function getBearerToken(req: Request): string {
@@ -119,6 +132,9 @@ export const finalizeRegister = asyncHandler(async (req, res) => {
         if (session.application.is_finalized) {
             throw new ApiError(400, "ใบสมัครนี้สร้างร้านแล้ว");
         }
+        if (req.body.pdpa_accepted !== "true") {
+            throw new ApiError(400, "กรุณายอมรับนโยบายความเป็นส่วนตัวและเงื่อนไขก่อนส่งใบสมัคร");
+        }
 
         const files = req.files as {
             st_image?: Express.Multer.File[];
@@ -131,6 +147,9 @@ export const finalizeRegister = asyncHandler(async (req, res) => {
         const locations = JSON.parse(req.body.locations ?? "[]");
         const employees = JSON.parse(req.body.employees ?? "[]");
         const documentsMeta = JSON.parse(req.body.documents_meta ?? "[]");
+        if (!Array.isArray(employees) || employees.length !== 1 || employees[0]?.e_status !== "Owner") {
+            throw new ApiError(400, "การสมัครผู้ขายต้องมี Primary Owner เพียง 1 คน");
+        }
 
         let stImagePath: string | null = null;
         const stImageFile = files?.st_image?.[0];
@@ -224,6 +243,13 @@ export const finalizeRegister = asyncHandler(async (req, res) => {
                 employees: {
                     employees: employeesWithPassword.map(({ e_password, ...employee }: any) => employee),
                 },
+                consent: {
+                    pdpa_accepted: true,
+                    pdpa_accepted_at: new Date().toISOString(),
+                    pdpa_notice_version: SELLER_PDPA_NOTICE_VERSION,
+                    ip_address: req.ip,
+                    user_agent: req.get("user-agent") ?? null,
+                },
             },
         });
 
@@ -234,6 +260,61 @@ export const finalizeRegister = asyncHandler(async (req, res) => {
             })
             .catch((error) => {
                 console.warn(`[seller-applications] send registration email failed for store ${storeId}:`, error);
+            });
+
+        store.createStoreEmailVerificationInvite({
+            stId: storeId,
+            createdByEmpId: null,
+        }).then((storeEmailInvite) => {
+            const verifyUrl = buildBackofficeUrl(`/store-email-confirmation?token=${encodeURIComponent(storeEmailInvite.token)}`);
+            if (!verifyUrl) {
+                console.warn("[seller-applications] skipped store email verification: BACKOFFICE_URL is missing");
+                return;
+            }
+            return sendStoreEmailVerificationEmail({
+                email: storeEmailInvite.email,
+                storeName: storeEmailInvite.storeName,
+                verifyUrl,
+                expiresAt: storeEmailInvite.expiresAt,
+            });
+        }).catch((error) => {
+            console.warn(`[seller-applications] send store email verification failed for store ${storeId}:`, error);
+        });
+
+        empService.listEmps(storeId)
+            .then(async (createdEmployees) => {
+                const ownerEmail = String(employeesWithPassword[0]?.e_email ?? "").trim().toLowerCase();
+                const owner = createdEmployees.find((employee) =>
+                    employee.e_status === "Owner" &&
+                    String(employee.e_email ?? "").trim().toLowerCase() === ownerEmail
+                ) ?? createdEmployees.find((employee) => employee.e_status === "Owner");
+                if (!owner) return;
+
+                const token = crypto.randomBytes(32).toString("hex");
+                const invite = await empService.createEmployeeEmailVerificationInvite({
+                    e_id: owner.e_id,
+                    tokenHash: hashEmailVerificationToken(token),
+                    requiresPasswordSetup: false,
+                    requestIp: req.ip ?? null,
+                    userAgent: req.get("user-agent") ?? null,
+                });
+                const verifyUrl = buildBackofficeUrl(`/employee-email-confirmation?token=${encodeURIComponent(token)}`);
+                if (!verifyUrl) {
+                    console.warn("[seller-applications] skipped owner email verification: BACKOFFICE_URL is missing");
+                    return;
+                }
+
+                return sendEmployeeEmailVerificationEmail({
+                    email: invite.email,
+                    name: invite.name,
+                    storeName: invite.storeName,
+                    role: invite.role,
+                    verifyUrl,
+                    expiresAt: invite.expiresAt,
+                });
+            })
+            .catch((error) => {
+                console.warn(`[seller-applications] send owner email verification failed for store ${storeId}:`, error);
             });
 
         res.status(201).json({ message: CommonMessages.insertSuccess, id: storeId, data: application });

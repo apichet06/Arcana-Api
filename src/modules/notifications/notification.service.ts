@@ -1,7 +1,7 @@
 
 import { pool } from "../../db/pool.js";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
-import { mapPriorityToType, type NotificationDTO, type NotificationInput } from "./type.js";
+import { mapPriorityToType, type NotificationDTO, type NotificationInput, type PlatformNotificationInput } from "./type.js";
 
 import { getIO } from "../../socket/socket.js";
 import { ApiError } from "../../shared/errors/ApiError.js";
@@ -96,7 +96,7 @@ export async function CreateNotification(input: NotificationInput): Promise<void
             created_at: new Date(),
         });
 
-        if (input.target_type === "STORE") {
+        if (input.target_type === "STORE" && input.notifyPlatform) {
             const [platformStores] = await conn.query<(RowDataPacket & { st_id: number })[]>(
                 "SELECT st_id FROM Store WHERE is_platform_store = 1"
             );
@@ -121,6 +121,58 @@ export async function CreateNotification(input: NotificationInput): Promise<void
                     created_at: new Date(),
                 });
             }
+        }
+
+        await conn.commit();
+    } catch (error) {
+        await conn.rollback();
+        throw error;
+    } finally {
+        conn.release();
+    }
+
+    for (const notification of notifications) {
+        const roomName = `${notification.target_type}_${notification.target_id}`;
+        getIO().to(roomName).emit("notification:new", notification);
+    }
+}
+
+/** ส่งแจ้งเตือนให้เฉพาะ platform store (เจ้าของเว็บไซต์) โดยไม่แจ้ง store ต้นเรื่อง */
+export async function NotifyPlatformStores(input: PlatformNotificationInput): Promise<void> {
+    const conn = await pool.getConnection();
+    const notifications: Record<string, unknown>[] = [];
+    try {
+        await conn.beginTransaction();
+        const [platformStores] = await conn.query<(RowDataPacket & { st_id: number })[]>(
+            "SELECT st_id FROM Store WHERE is_platform_store = 1"
+        );
+
+        for (const store of platformStores) {
+            const platformStoreId = Number(store.st_id);
+            if (!platformStoreId) continue;
+
+            const platformData = {
+                target_type: "STORE" as const,
+                target_id: platformStoreId,
+                type: input.type,
+                title: input.title,
+                message: input.message,
+                action_url: input.action_url,
+                ref_type: input.ref_type,
+                ref_id: input.ref_id,
+                priority: input.priority ?? "NORMAL",
+            };
+            const [platformResult] = await conn.query<ResultSetHeader>(
+                "INSERT INTO Notifications SET ?",
+                platformData
+            );
+            notifications.push({
+                noti_id: platformResult.insertId,
+                ...platformData,
+                is_read: 0,
+                read_at: null,
+                created_at: new Date(),
+            });
         }
 
         await conn.commit();

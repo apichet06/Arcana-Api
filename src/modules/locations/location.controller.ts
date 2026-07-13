@@ -20,8 +20,7 @@ export const getById = asyncHandler(async (req, res) => {
 
 export const create = asyncHandler(async (req, res) => {
     const { st_id, Subdistricts_id, Districts_id, Provinces_id, loc_address, zip_code, is_default } = req.body;
-    const empId = Number(req.empId);
-    const input = { e_id: empId, st_id, Subdistricts_id, Districts_id, Provinces_id, loc_address, zip_code, is_default };
+    const input = { st_id, Subdistricts_id, Districts_id, Provinces_id, loc_address, zip_code, is_default };
     const id = await locations.CreateLocation(input);
     res.status(201).json({ message: CommonMessages.insertSuccess, id });
 });

@@ -24,8 +24,7 @@ export function getMailConfig(): MailConfig | null {
     };
 }
 
-export function createTransporter() {
-    const config = getMailConfig();
+export function createTransporter(config: MailConfig | null = getMailConfig()) {
     if (!config) return null;
 
     return nodemailer.createTransport({
@@ -45,9 +44,14 @@ export async function sendMail(input: {
     text: string;
     html: string;
 }): Promise<void> {
-    const transporter = createTransporter();
     const config = getMailConfig();
-    if (!transporter || !config) return;
+    if (!config) {
+        throw new Error("Mail configuration is missing");
+    }
+    const transporter = createTransporter(config);
+    if (!transporter) {
+        throw new Error("Mail transporter could not be created");
+    }
 
     await transporter.sendMail({
         from: `"${config.fromName}" <${config.fromEmail}>`,

@@ -23,6 +23,29 @@ export type PasswordResetEmailInput = {
     expiresInMinutes: number;
 };
 
+export type SellerConfirmationEmailInput = {
+    email: string;
+    storeName: string;
+    confirmUrl: string;
+    expiresAt: Date;
+};
+
+export type StoreEmailVerificationEmailInput = {
+    email: string;
+    storeName: string;
+    verifyUrl: string;
+    expiresAt: Date;
+};
+
+export type EmployeeEmailVerificationEmailInput = {
+    email: string;
+    name?: string | null;
+    storeName?: string | null;
+    role?: string | null;
+    verifyUrl: string;
+    expiresAt: Date;
+};
+
 export type MailConfig = {
     host: string;
     port: number;

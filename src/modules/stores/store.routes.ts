@@ -43,10 +43,15 @@ storeRouter.get("/company-name/:st_company_name", controller.existsCompanyName);
 storeRouter.get("/email/:st_email", controller.existsEmailStore);
 storeRouter.get("/email-employee/:e_email", controller.existsEmailEmployee);
 storeRouter.get("/banks", controller.listBanks);
+storeRouter.get("/seller-confirmations/:token", controller.getSellerConfirmation);
+storeRouter.post("/seller-confirmations/:token/confirm", controller.confirmSellerConfirmation);
+storeRouter.post("/email-verifications/:token/confirm", controller.confirmStoreEmail);
 // storeRouter.post("/", upload.single("st_image"), controller.create);
-storeRouter.post("/storesregister", uploadStoreRegister, controller.createRegister);
 
 storeRouter.use(Auth);
+storeRouter.post("/storesregister", uploadStoreRegister, controller.createRegister);
+storeRouter.post("/:st_id/resend-seller-confirmation", controller.resendSellerConfirmation);
+storeRouter.post("/:st_id/resend-store-email-verification", controller.resendStoreEmailVerification);
 storeRouter.get("/:st_id", controller.getById);
 storeRouter.get("/", controller.list);
 storeRouter.put("/:st_id", upload.single("st_image"), controller.update);

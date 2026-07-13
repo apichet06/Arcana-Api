@@ -1,7 +1,6 @@
 export type LocationsDTO = {
     loc_id: number;
     loc_name: string;
-    e_id: string;
     loc_address: string;
     loc_postcode: string;
     st_id: number;
@@ -12,7 +11,6 @@ export type LocationsDTO = {
 };
 
 export type CreateLocationInput = {
-    e_id: number;
     loc_address: string;
     zip_code: string;
     st_id: number;
@@ -24,7 +22,6 @@ export type CreateLocationInput = {
 
 export type UpdateLocationInput = {
     loc_id: number;
-    e_id: number;
     loc_address: string;
     loc_postcode: string;
     st_id: number;
