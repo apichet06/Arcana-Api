@@ -105,6 +105,13 @@ function omiseAuthHeader(): string {
     return `Basic ${Buffer.from(`${env.OMISE_SECRET_KEY}:`).toString("base64")}`;
 }
 
+function omisePublicAuthHeader(): string {
+    if (!env.OMISE_PUBLIC_KEY) {
+        throw new ApiError(500, "ยังไม่ได้ตั้งค่า OMISE_PUBLIC_KEY ที่ API server");
+    }
+    return `Basic ${Buffer.from(`${env.OMISE_PUBLIC_KEY}:`).toString("base64")}`;
+}
+
 export async function omiseRequest<T>(path: string, init: RequestInit): Promise<T> {
     const res = await fetch(`https://api.omise.co${path}`, {
         ...init,
@@ -119,6 +126,25 @@ export async function omiseRequest<T>(path: string, init: RequestInit): Promise<
     const payload = (text ? JSON.parse(text) : {}) as T & { message?: string };
     if (!res.ok) {
         throw new ApiError(400, payload.message || "เชื่อมต่อ Omise ไม่สำเร็จ", payload);
+    }
+
+    return payload;
+}
+
+async function omiseVaultRequest<T>(path: string, init: RequestInit): Promise<T> {
+    const res = await fetch(`https://vault.omise.co${path}`, {
+        ...init,
+        headers: {
+            Authorization: omisePublicAuthHeader(),
+            "Content-Type": "application/x-www-form-urlencoded",
+            ...(init.headers ?? {}),
+        },
+    });
+
+    const text = await res.text();
+    const payload = (text ? JSON.parse(text) : {}) as T & { message?: string };
+    if (!res.ok) {
+        throw new ApiError(400, payload.message || "อ่าน token จาก Omise ไม่สำเร็จ", payload);
     }
 
     return payload;
@@ -265,7 +291,7 @@ async function getExistingCustomerId(conn: PoolConnection, uId: number): Promise
 }
 
 async function getTokenCard(tokenId: string): Promise<OmiseCardDTO | null> {
-    const token = await omiseRequest<OmiseTokenDTO>(`/tokens/${tokenId.trim()}`, {
+    const token = await omiseVaultRequest<OmiseTokenDTO>(`/tokens/${tokenId.trim()}`, {
         method: "GET",
     });
     return token.card ?? null;
