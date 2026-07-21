@@ -33,6 +33,7 @@ export type OrderItemDTO = {
     st_id?: number;
     ctl_id?: number;
     st_company_name?: string | null;
+    is_reviewed: number;
     created_at: string;
 };
 

@@ -59,9 +59,14 @@ export async function getReviews(
 
 // สร้างรีวิวใหม่ (ต้องซื้อสินค้านั้นจริงๆ)
 export async function createReview(input: CreateReviewInput): Promise<void> {
+    const conn = await pool.getConnection()
+    try {
+        await conn.beginTransaction()
+
     // ตรวจว่า oi_id นั้นเป็นของ user นี้และมี pv_id ตรงกัน
     // เช็ค 3 ทางเพราะ delivered อาจมาจาก: legacy status, shipment_status จาก SHIPPOP, หรือ s_code ใหม่
-    const [orderCheck] = await pool.query<RowDataPacket[]>(
+    // lock order item เพื่อให้ request รีวิว oi_id เดียวกันทำงานทีละรายการ
+    const [orderCheck] = await conn.query<RowDataPacket[]>(
         `SELECT oi.oi_id
          FROM Order_items oi
          JOIN Orders o ON o.or_id = oi.or_id
@@ -70,25 +75,22 @@ export async function createReview(input: CreateReviewInput): Promise<void> {
            AND (
                o.status IN ('delivered', 'reviewed')
                OR o.shipment_status = 'delivered'
-               OR os.s_code IN ('DELIVERED', 'REVIEWED')
+               OR os.s_code IN ('DELIVERED', 'RECEIVED', 'AUTO_RECEIVED', 'REVIEWED')
            )
-         LIMIT 1`,
+         LIMIT 1
+         FOR UPDATE`,
         [input.oi_id, input.pv_id, input.u_id]
     )
 
     if (!orderCheck[0]) throw new ApiError(403, "ต้องรับสินค้าเรียบร้อยก่อนจึงจะรีวิวได้")
 
     // ป้องกันรีวิวซ้ำในรายการสั่งซื้อเดิม
-    const [dupCheck] = await pool.query<RowDataPacket[]>(
+    const [dupCheck] = await conn.query<RowDataPacket[]>(
         "SELECT ed_id FROM Estimate_delivery WHERE oi_id = ? LIMIT 1",
         [input.oi_id]
     )
 
     if (dupCheck[0]) throw new ApiError(409, "คุณรีวิวรายการนี้ไปแล้ว")
-
-    const conn = await pool.getConnection()
-    try {
-        await conn.beginTransaction()
 
         const [result] = await conn.query<ResultSetHeader>(
             "INSERT INTO Estimate_delivery SET ?",

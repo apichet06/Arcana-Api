@@ -34,7 +34,10 @@ export const create = asyncHandler(async (req, res) => {
 
     const { pv_id, oi_id, massages, delivery_score, product_score } = req.body ?? {}
 
-    if (!pv_id || !oi_id || !massages) throw new ApiError(400, "กรุณากรอกข้อมูลให้ครบถ้วน")
+    if (!pv_id || !oi_id) throw new ApiError(400, "กรุณากรอกข้อมูลให้ครบถ้วน")
+
+    const reviewMessage = typeof massages === "string" ? massages.trim() : ""
+    if (reviewMessage.length > 500) throw new ApiError(400, "ความคิดเห็นต้องไม่เกิน 500 ตัวอักษร")
 
     const dScore = Number(delivery_score)
     const pScore = Number(product_score)
@@ -49,7 +52,7 @@ export const create = asyncHandler(async (req, res) => {
         u_id,
         pv_id: Number(pv_id),
         oi_id: Number(oi_id),
-        massages,
+        massages: reviewMessage,
         delivery_score: dScore,
         product_score: pScore,
         imageFiles,
