@@ -43,8 +43,7 @@ const REFUND_REQUESTABLE_STATUS_CODES: OrderStatusCode[] = ["CONFIRMED", "PROCES
 const ORDER_RECEIVED_STATUS_CODES: OrderStatusCode[] = ["RECEIVED", "AUTO_RECEIVED", "REVIEWED"];
 const ADMIN_STATUS_TRANSITIONS: Record<string, OrderStatusCode> = {
     CONFIRMED: "PROCESSING",
-    PROCESSING: "PACKED",
-    PACKED: "READY_TO_SHIP",
+    PROCESSING: "READY_TO_SHIP",
 };
 
 let autoReceiveJobStarted = false;

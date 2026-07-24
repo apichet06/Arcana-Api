@@ -16,3 +16,4 @@ reviewRouter.get("/check", BuyerAuth, controller.checkReviewable)
 
 // BuyerAuth — สร้างรีวิวพร้อมรูปสูงสุด 5 รูป
 reviewRouter.post("/", BuyerAuth, upload.array("images", 5), controller.create)
+reviewRouter.get("/featured", controller.featured)

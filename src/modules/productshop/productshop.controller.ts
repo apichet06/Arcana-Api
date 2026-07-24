@@ -11,6 +11,7 @@ export const listProductShop = asyncHandler(async (req, res) => {
     const limit = Number(req.query.limit ?? 12)
     const ctl_id = req.query.ctl_id ? Number(req.query.ctl_id) : undefined
     const random = req.query.random === "1" || req.query.random === "true"
+    const in_stock_only = req.query.in_stock_only === "1" || req.query.in_stock_only === "true"
 
     const productShopParams: productShopService.GetProductShopParams = {
         lg_code: lg_code as string,
@@ -20,6 +21,7 @@ export const listProductShop = asyncHandler(async (req, res) => {
         category,
         limit,
         random,
+        in_stock_only,
     }
 
     if (ctl_id !== undefined) {

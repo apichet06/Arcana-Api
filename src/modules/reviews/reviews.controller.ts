@@ -60,3 +60,50 @@ export const create = asyncHandler(async (req, res) => {
 
     res.status(201).json({ message: "รีวิวสำเร็จ" })
 })
+
+
+// GET /api/reviews/featured?website=arcana&lang=th&limit=8
+export const featured = asyncHandler(async (req, res) => {
+    const website = String(req.query.website ?? "")
+        .trim()
+        .toLowerCase()
+
+    const requestedLanguage = String(req.query.lang ?? "th")
+        .trim()
+        .toLowerCase()
+
+    const requestedLimit = Number(req.query.limit ?? 8)
+    const limit = Number.isFinite(requestedLimit)
+        ? Math.min(12, Math.max(1, requestedLimit))
+        : 8
+
+    const ctlId =
+        website === "arcana"
+            ? 1
+            : website === "deadstock"
+                ? 2
+                : null
+
+    if (!ctlId) {
+        throw new ApiError(
+            400,
+            "website ต้องเป็น arcana หรือ deadstock"
+        )
+    }
+
+    const language = ["th", "en", "ja"].includes(requestedLanguage)
+        ? requestedLanguage
+        : "th"
+
+    const reviews = await service.getFeaturedProductReviews(
+        ctlId,
+        language,
+        limit
+    )
+
+    res.json({
+        data: {
+            reviews,
+        },
+    })
+})

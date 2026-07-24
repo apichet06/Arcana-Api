@@ -11,6 +11,7 @@ export type GetProductShopParams = {
     limit?: number
     ctl_id?: number  // filter ตาม catalog (arcana=1, deadstock=2)
     random?: boolean
+    in_stock_only?: boolean
 }
 
 /**
@@ -64,6 +65,7 @@ export async function getProductShop({
     limit = 12,
     ctl_id,
     random = false,
+    in_stock_only = false,
 }: GetProductShopParams): Promise<ProductShopResponse> {
     const conn = await pool.getConnection()
 
@@ -138,6 +140,21 @@ export async function getProductShop({
         whereConditions.push(`a.p_isActive = 1`)
         whereConditions.push(`a.p_isAccept = 1`)
 
+        if (in_stock_only) {
+            whereConditions.push(`
+                EXISTS (
+                    SELECT 1
+                    FROM Inventorys stock_inv
+                    INNER JOIN ProductVariants stock_pv
+                        ON stock_pv.pv_id = stock_inv.pv_id
+                    WHERE stock_pv.p_id = a.p_id
+                    GROUP BY stock_pv.p_id
+                    HAVING
+                        COALESCE(SUM(stock_inv.on_hand), 0)
+                        - COALESCE(SUM(stock_inv.reserved_qty), 0) > 0
+                )
+            `)
+        }
 
         const whereSql = whereConditions.length > 0
             ? `WHERE ${whereConditions.join(" AND ")}`

@@ -63,11 +63,11 @@ export async function createReview(input: CreateReviewInput): Promise<void> {
     try {
         await conn.beginTransaction()
 
-    // ตรวจว่า oi_id นั้นเป็นของ user นี้และมี pv_id ตรงกัน
-    // เช็ค 3 ทางเพราะ delivered อาจมาจาก: legacy status, shipment_status จาก SHIPPOP, หรือ s_code ใหม่
-    // lock order item เพื่อให้ request รีวิว oi_id เดียวกันทำงานทีละรายการ
-    const [orderCheck] = await conn.query<RowDataPacket[]>(
-        `SELECT oi.oi_id
+        // ตรวจว่า oi_id นั้นเป็นของ user นี้และมี pv_id ตรงกัน
+        // เช็ค 3 ทางเพราะ delivered อาจมาจาก: legacy status, shipment_status จาก SHIPPOP, หรือ s_code ใหม่
+        // lock order item เพื่อให้ request รีวิว oi_id เดียวกันทำงานทีละรายการ
+        const [orderCheck] = await conn.query<RowDataPacket[]>(
+            `SELECT oi.oi_id
          FROM Order_items oi
          JOIN Orders o ON o.or_id = oi.or_id
          LEFT JOIN Status os ON os.s_id = o.s_id
@@ -79,18 +79,18 @@ export async function createReview(input: CreateReviewInput): Promise<void> {
            )
          LIMIT 1
          FOR UPDATE`,
-        [input.oi_id, input.pv_id, input.u_id]
-    )
+            [input.oi_id, input.pv_id, input.u_id]
+        )
 
-    if (!orderCheck[0]) throw new ApiError(403, "ต้องรับสินค้าเรียบร้อยก่อนจึงจะรีวิวได้")
+        if (!orderCheck[0]) throw new ApiError(403, "ต้องรับสินค้าเรียบร้อยก่อนจึงจะรีวิวได้")
 
-    // ป้องกันรีวิวซ้ำในรายการสั่งซื้อเดิม
-    const [dupCheck] = await conn.query<RowDataPacket[]>(
-        "SELECT ed_id FROM Estimate_delivery WHERE oi_id = ? LIMIT 1",
-        [input.oi_id]
-    )
+        // ป้องกันรีวิวซ้ำในรายการสั่งซื้อเดิม
+        const [dupCheck] = await conn.query<RowDataPacket[]>(
+            "SELECT ed_id FROM Estimate_delivery WHERE oi_id = ? LIMIT 1",
+            [input.oi_id]
+        )
 
-    if (dupCheck[0]) throw new ApiError(409, "คุณรีวิวรายการนี้ไปแล้ว")
+        if (dupCheck[0]) throw new ApiError(409, "คุณรีวิวรายการนี้ไปแล้ว")
 
         const [result] = await conn.query<ResultSetHeader>(
             "INSERT INTO Estimate_delivery SET ?",
@@ -172,4 +172,61 @@ export async function getReviewableItems(u_id: number, pv_id: number) {
     )
 
     return rows.map(r => r.oi_id)
+}
+
+export type FeaturedProductReview = {
+    ed_id: number
+    p_id: number
+    product_name: string
+    u_username: string
+    massages: string
+    product_score: number
+    create_at: string
+}
+
+export async function getFeaturedProductReviews(
+    ctlId: number,
+    language: string,
+    limit: number
+): Promise<FeaturedProductReview[]> {
+    const [rows] = await pool.query<(RowDataPacket & FeaturedProductReview)[]>(
+        `
+        SELECT
+            ed.ed_id,
+            p.p_id,
+            pl.p_name AS product_name,
+            u.u_username,
+            ed.massages,
+            ed.product_score,
+            ed.create_at
+        FROM Estimate_delivery ed
+        INNER JOIN Users u
+            ON u.u_id = ed.u_id
+        INNER JOIN ProductVariants pv
+            ON pv.pv_id = ed.pv_id
+        INNER JOIN Products p
+            ON p.p_id = pv.p_id
+        INNER JOIN ProductLangs pl
+            ON pl.p_id = p.p_id
+           AND pl.lg_code = ?
+        WHERE p.ctl_id = ?
+          AND p.p_isActive = 1
+          AND p.p_isAccept = 1
+          AND ed.product_score >= 4
+          AND TRIM(COALESCE(ed.massages, '')) <> ''
+         ORDER BY RAND()
+        LIMIT ?
+        `,
+        [language, ctlId, limit]
+    )
+
+    return rows.map(row => ({
+        ed_id: Number(row.ed_id),
+        p_id: Number(row.p_id),
+        product_name: String(row.product_name),
+        u_username: String(row.u_username),
+        massages: String(row.massages),
+        product_score: Number(row.product_score),
+        create_at: String(row.create_at),
+    }))
 }
